@@ -24,6 +24,7 @@ import com.nvidia.spark.rapids.{BaseExprMeta, DataFromReplacementRule, GpuColumn
 import com.nvidia.spark.rapids.GpuMetric.{COLLECT_TIME, DESCRIPTION_COLLECT_TIME, ESSENTIAL_LEVEL}
 import com.nvidia.spark.rapids.shims.{ShimUnaryExecNode, SparkShimImpl}
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, BoundReference, Cast, Expression, NamedExpression, UnsafeProjection}
@@ -39,7 +40,7 @@ class GpuSubqueryBroadcastMeta(
     conf: RapidsConf,
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule) extends
-    SparkPlanMeta[SubqueryBroadcastExec](s, conf, p, r) {
+    SparkPlanMeta[SubqueryBroadcastExec](s, conf, p, r) with Logging {
 
   private var broadcastBuilder: () => SparkPlan = _
 
@@ -73,6 +74,7 @@ class GpuSubqueryBroadcastMeta(
     //       +- [GPU overrides of executed subquery...]
     //
     case ex @ BroadcastExchangeExec(_, c2r: GpuColumnarToRowExec) =>
+      logWarning("Tom tag plan for GpuSubqueryBroadcastMeta broadcast")
       val exMeta = new GpuBroadcastMeta(ex.copy(child = c2r.child), conf, p, r)
       exMeta.tagForGpu()
       if (exMeta.canThisBeReplaced) {
@@ -108,6 +110,7 @@ class GpuSubqueryBroadcastMeta(
     //          +- [GPU overrides of executed subquery...]
     //
     case a: AdaptiveSparkPlanExec =>
+      logWarning("Tom tag plan for GpuSubqueryBroadcastMeta AQE")
       SparkShimImpl.getAdaptiveInputPlan(a) match {
         case ex: BroadcastExchangeExec =>
           val exMeta = new GpuBroadcastMeta(ex, conf, p, r)
@@ -124,6 +127,7 @@ class GpuSubqueryBroadcastMeta(
       }
 
     case _ =>
+      logWarning("Tom tag plan for GpuSubqueryBroadcastMeta not work")
       willNotWorkOnGpu("the subquery to broadcast can not entirely run in the GPU.")
   }
 

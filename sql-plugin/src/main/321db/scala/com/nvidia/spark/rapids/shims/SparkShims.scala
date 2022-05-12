@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids._
 import org.apache.hadoop.fs.FileStatus
 
 import org.apache.spark.{SparkEnv, TaskContext}
+import org.apache.spark.internal.Logging
 import org.apache.spark.memory.TaskMemoryManager
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
@@ -38,7 +39,7 @@ import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.rapids.shims.GpuFileScanRDD
 import org.apache.spark.sql.types._
 
-object SparkShimImpl extends Spark321PlusShims {
+object SparkShimImpl extends Spark321PlusShims with Logging {
 
   override def getSparkShimVersion: ShimVersion = ShimLoader.getShimVersion
 
@@ -100,15 +101,20 @@ object SparkShimImpl extends Spark321PlusShims {
               meta.tagForExplain()
               meta.convertIfNeeded().asInstanceOf[BaseSubqueryExec]
             }
+            logWarning("in partitionFilters Tom contains: " + wrapped.partitionFilters.mkString(","))
             wrapped.partitionFilters.map { filter =>
               filter.transformDown {
                 case dpe @ DynamicPruningExpression(inSub: InSubqueryExec) =>
+                  logWarning("in dynamic pruning Tom")
                   inSub.plan match {
                     case bc: SubqueryBroadcastExec =>
+                      logWarning("in subquery Tom")
                       dpe.copy(inSub.copy(plan = convertBroadcast(bc)))
                     case reuse @ ReusedSubqueryExec(bc: SubqueryBroadcastExec) =>
+                      logWarning("in reused Tom")
                       dpe.copy(inSub.copy(plan = reuse.copy(convertBroadcast(bc))))
                     case _ =>
+                      logWarning("in default Tom")
                       dpe
                   }
               }
@@ -138,6 +144,8 @@ object SparkShimImpl extends Spark321PlusShims {
           override def convertToGpu(): GpuExec = {
             val sparkSession = wrapped.relation.sparkSession
             val options = wrapped.relation.options
+
+            logWarning("in databricks convert Tom")
 
             val location = AlluxioUtils.replacePathIfNeeded(
               conf,

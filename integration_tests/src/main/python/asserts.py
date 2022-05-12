@@ -190,7 +190,8 @@ def _prep_func_for_compare(func, mode):
 
     def debug(spark):
         df = sorted_func(spark)
-        return data_gen.debug(df)
+        df.explain()
+        return data_gen.debug_df(df)
 
     new_sorted_func = debug
 
