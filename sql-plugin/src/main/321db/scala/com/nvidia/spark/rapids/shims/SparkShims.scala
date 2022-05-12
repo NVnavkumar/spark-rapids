@@ -103,6 +103,7 @@ object SparkShimImpl extends Spark321PlusShims with Logging {
             }
             logWarning("in partitionFilters Tom contains: " + wrapped.partitionFilters.mkString(","))
             wrapped.partitionFilters.map { filter =>
+              logWarning("Tom filter class is : " + filter.getClass)
               filter.transformDown {
                 case dpe @ DynamicPruningExpression(inSub: InSubqueryExec) =>
                   logWarning("in dynamic pruning Tom")
@@ -117,6 +118,24 @@ object SparkShimImpl extends Spark321PlusShims with Logging {
                       logWarning("in default Tom")
                       dpe
                   }
+                // DynamicPruningExpression(InSubqueryExec(value, subqueryMap(exprId.id), exprId))
+                // pattern org.apache.spark.sql.catalyst.expressions.DynamicPruningSubquery(
+                // child: org.apache.spark.sql.catalyst.expressions.Expression,
+                // buildQueryOutput: Seq[org.apache.spark.sql.catalyst.expressions.Attribute],
+                // buildKeys: Seq[org.apache.spark.sql.catalyst.expressions.Expression],
+                // broadcastKeyIndex: Int,
+                // onlyInBroadcast: Boolean,
+                // buildQueryId: Long,
+                // buildQuery: Option[org.apache.spark.sql.catalyst.plans.QueryPlan[_]],
+                // sharedKeyIndices: Seq[Int],
+                // exprId: org.apache.spark.sql.catalyst.expressions.ExprId)
+                // /
+                case dpe @ DynamicPruningSubquery(child, buildqueryo, buildKeys, broadcastKeyindex, onlyInBroadcast, buildQueryId, buildQuery, sharedKeyIndices, exprId) =>
+                  logWarning(s"in dynamic pruning subquery Tom: ${child.getClass} $buildqueryo $buildKeys $broadcastKeyindex $onlyInBroadcast $buildQueryId $buildQuery $sharedKeyIndices $exprId")
+                  dpe
+                case o => 
+                  logWarning("not dynamnic pruning expressions: " + o)
+                  o
               }
             }
           }
