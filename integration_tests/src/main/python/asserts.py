@@ -188,14 +188,20 @@ def _prep_func_for_compare(func, mode):
     else:
         sorted_func = func
 
+    def debug(spark):
+        df = sorted_func(spark)
+        return data_gen.debug(df)
+
+    new_sorted_func = debug
+
     limit_val = get_limit()
     if limit_val > 0:
         def with_limit(spark):
-            df = sorted_func(spark)
+            df = new_sorted_func(spark)
             return df.limit(limit_val)
         limit_func = with_limit
     else:
-        limit_func = sorted_func
+        limit_func = new_sorted_func
 
     if mode == 'COLLECT':
         bring_back = lambda spark: limit_func(spark).collect()

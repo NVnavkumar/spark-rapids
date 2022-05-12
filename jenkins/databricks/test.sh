@@ -19,7 +19,7 @@ set -ex
 
 LOCAL_JAR_PATH=${LOCAL_JAR_PATH:-''}
 SPARK_CONF=${SPARK_CONF:-''}
-BASE_SPARK_VER=${BASE_SPARK_VER:-'3.1.2'}
+BASE_SPARK_VER=${BASE_SPARK_VER:-'3.2.1'}
 [[ -z $SPARK_SHIM_VER ]] && export SPARK_SHIM_VER=spark${BASE_SPARK_VER//.}db
 
 # Try to use "cudf-udf" conda environment for the python cudf-udf tests.
@@ -117,13 +117,13 @@ if [ -d "$LOCAL_JAR_PATH" ]; then
 else
     if [[ $TEST_MODE == "ALL" || $TEST_MODE == "IT_ONLY" ]]; then
         ## Run tests with jars building from the spark-rapids source code
-        bash /home/ubuntu/spark-rapids/integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE
+        bash /home/ubuntu/spark-rapids/integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE dpp_test
 
         ## Run cache tests
-        if [[ "$IS_SPARK_311_OR_LATER" -eq "1" ]]; then
-            PYSP_TEST_spark_sql_cache_serializer=${PCBS_CONF} \
-            bash /home/ubuntu/spark-rapids/integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE -k cache_test
-        fi
+        #if [[ "$IS_SPARK_311_OR_LATER" -eq "1" ]]; then
+        #    PYSP_TEST_spark_sql_cache_serializer=${PCBS_CONF} \
+        #    bash /home/ubuntu/spark-rapids/integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE -k cache_test
+        #fi
     fi
 
     if [[ "$TEST_MODE" == "ALL" || "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
