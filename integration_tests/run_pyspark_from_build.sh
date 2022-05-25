@@ -80,7 +80,7 @@ else
     then
         TEST_TAGS="-m $TEST_TAGS"
     fi
-    TEST_PARALLEL=1
+    #TEST_PARALLEL=1
     if [[ "${TEST_PARALLEL}" == "" ]];
     then
         # For integration tests we want to have at least
@@ -185,7 +185,7 @@ else
     export PYSP_TEST_spark_ui_showConsoleProgress='false'
     export PYSP_TEST_spark_sql_session_timeZone='UTC'
     export PYSP_TEST_spark_sql_shuffle_partitions='4'
-    export PYSP_TEST_spark_rapids_sql_explain='ALL'
+    #export PYSP_TEST_spark_rapids_sql_explain='ALL'
     # prevent cluster shape to change
     export PYSP_TEST_spark_dynamicAllocation_enabled='false'
     export PYSP_TEST_spark_rapids_memory_host_spillStorageSize='100m'

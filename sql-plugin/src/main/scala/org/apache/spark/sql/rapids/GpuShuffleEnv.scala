@@ -112,6 +112,12 @@ object GpuShuffleEnv extends Logging {
   def isRapidsShuffleAvailable(conf: RapidsConf): Boolean = {
     // the driver has `mgr` defined when this is checked
     val sparkEnv = SparkEnv.get
+    if (sparkEnv == null) {
+      throw new Exception("spark env is null")
+    }
+    if (sparkEnv.shuffleManager == null) {
+      throw new Exception("spark env shufflemanager is null")
+    }
     val isRapidsManager = sparkEnv.shuffleManager.isInstanceOf[VisibleShuffleManager]
     if (isRapidsManager) {
       validateRapidsShuffleManager(sparkEnv.shuffleManager.getClass.getName)
