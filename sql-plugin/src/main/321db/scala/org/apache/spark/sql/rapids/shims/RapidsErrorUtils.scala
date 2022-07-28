@@ -35,7 +35,7 @@ object RapidsErrorUtils {
       keyType: DataType,
       origin: Origin): NoSuchElementException = {
     // For now, the default argument is false. The caller sets the correct value accordingly.
-    QueryExecutionErrors.mapKeyNotExistError(key)
+    QueryExecutionErrors.mapKeyNotExistError(key, null)
   }
 
   def sqlArrayIndexNotStartAtOneError(): ArrayIndexOutOfBoundsException = {
@@ -43,11 +43,11 @@ object RapidsErrorUtils {
   }
 
   def divByZeroError(origin: Origin): ArithmeticException = {
-    QueryExecutionErrors.divideByZeroError()
+    QueryExecutionErrors.divideByZeroError(null)
   }
 
   def divOverflowError(origin: Origin): ArithmeticException = {
-    QueryExecutionErrors.overflowInIntegralDivideError()
+    QueryExecutionErrors.overflowInIntegralDivideError(null)
   }
 
   def arithmeticOverflowError(
@@ -62,11 +62,11 @@ object RapidsErrorUtils {
       toType: DecimalType,
       context: String = ""): ArithmeticException = {
     QueryExecutionErrors.cannotChangeDecimalPrecisionError(
-      value, toType.precision, toType.scale
+      value, toType.precision, toType.scale, context
     )
   }
 
   def overflowInIntegralDivideError(context: String = ""): ArithmeticException = {
-    QueryExecutionErrors.overflowInIntegralDivideError()
+    QueryExecutionErrors.overflowInIntegralDivideError(context)
   }
 }

@@ -78,7 +78,7 @@ case "$BASE_SPARK_VERSION" in
         HADOOP_VERSION=3.2
         HIVE_FULL_VERSION=2.3.9
         JSON4S_VERSION=3.7.0-M11
-        ORC_VERSION=1.6.13
+        ORC_VERSION=1.6.14
         PARQUET_VERSION=1.12.0
         ;;
     "3.1.2")
