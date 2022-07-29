@@ -27,6 +27,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.BroadcastMode
+import org.apache.spark.sql.catalyst.trees.TreePattern._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.datasources._
@@ -197,3 +198,7 @@ object SparkShimImpl extends Spark321PlusShims with Spark320until340Shims {
 
 // Fallback to the default definition of `deterministic`
 trait GpuDeterministicFirstLastCollectShim extends Expression
+
+trait ShimExtractValue extends ExtractValue {
+  override def nodePatternsInternal(): Seq[TreePattern] = Seq()
+}
