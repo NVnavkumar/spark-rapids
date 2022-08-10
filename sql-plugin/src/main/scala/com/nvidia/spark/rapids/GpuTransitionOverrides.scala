@@ -63,7 +63,7 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
 
   /** Adds the appropriate coalesce after a shuffle depending on the type of shuffle configured */
   private def addPostShuffleCoalesce(plan: SparkPlan): SparkPlan = {
-    if (GpuShuffleEnv.shouldUseRapidsShuffle(rapidsConf)) {
+    if (GpuShuffleEnv.useGPUShuffle(rapidsConf)) {
       GpuCoalesceBatches(plan, TargetSize(rapidsConf.gpuTargetBatchSizeBytes))
     } else {
       GpuShuffleCoalesceExec(plan, rapidsConf.gpuTargetBatchSizeBytes)
@@ -263,7 +263,7 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
       case (plan, null) =>
         // No coalesce requested
         insertCoalesce(plan, disableUntilInput)
-      case (plan, goal @ RequireSingleBatch) =>
+      case (plan, goal: RequireSingleBatchLike) =>
         // Even if coalesce is disabled a single batch is required to make this operator work
         // This should not cause bugs because we require a single batch in situations where
         // Spark also buffers data, so any operator that needs coalesce disabled would also
@@ -567,7 +567,7 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
         updatedPlan = insertColumnarFromGpu(updatedPlan)
         updatedPlan = insertCoalesce(updatedPlan)
         // only insert shuffle coalesces when using normal shuffle
-        if (!GpuShuffleEnv.shouldUseRapidsShuffle(rapidsConf)) {
+        if (!GpuShuffleEnv.useGPUShuffle(rapidsConf)) {
           updatedPlan = insertShuffleCoalesce(updatedPlan)
         }
         if (plan.conf.adaptiveExecutionEnabled) {
@@ -590,6 +590,12 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
           updatedPlan.canonicalized
           validateExecsInGpuPlan(updatedPlan, rapidsConf)
         }
+
+        if (rapidsConf.logQueryTransformations) {
+          logWarning(s"Transformed query:" +
+            s"\nOriginal Plan:\n$plan\nTransformed Plan:\n$updatedPlan")
+        }
+
         updatedPlan
       }
     } else {

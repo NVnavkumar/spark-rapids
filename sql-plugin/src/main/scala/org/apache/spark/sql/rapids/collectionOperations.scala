@@ -18,20 +18,19 @@ package org.apache.spark.sql.rapids
 
 import java.util.Optional
 
-import scala.collection.mutable.ArrayBuffer
-
 import ai.rapids.cudf
-import ai.rapids.cudf.{BinaryOp, ColumnVector, ColumnView, DType, GroupByAggregation, GroupByOptions, Scalar, SegmentedReductionAggregation, Table}
+import ai.rapids.cudf.{BinaryOp, ColumnVector, ColumnView, DType, Scalar, SegmentedReductionAggregation, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.ArrayIndexUtils.firstIndexAndNumElementUnchecked
 import com.nvidia.spark.rapids.BoolUtils.isAllValidTrue
 import com.nvidia.spark.rapids.GpuExpressionsUtils.columnarEvalToColumn
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.shims.{RapidsErrorUtils, ShimExpression}
+import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.{ExpectsInputTypes, Expression, ImplicitCastInputTypes, NamedExpression, RowOrdering, Sequence, TimeZoneAwareExpression}
+import org.apache.spark.sql.catalyst.expressions.{ExpectsInputTypes, Expression, ImplicitCastInputTypes, NamedExpression, NullIntolerant, RowOrdering, Sequence, TimeZoneAwareExpression}
 import org.apache.spark.sql.catalyst.util.GenericArrayData
+import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.array.ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH
@@ -59,25 +58,47 @@ case class GpuConcat(children: Seq[Expression]) extends GpuComplexTypeMergingExp
   }
 
   private def stringConcat(batch: ColumnarBatch): GpuColumnVector = {
-    withResource(ArrayBuffer.empty[cudf.ColumnVector]) { buffer =>
-      // build input buffer
-      children.foreach {
-        buffer += columnarEvalToColumn(_, batch).getBase
-      }
+    withResource(children.safeMap(columnarEvalToColumn(_, batch).getBase())) {cols =>
       // run string concatenate
       GpuColumnVector.from(
-        cudf.ColumnVector.stringConcatenate(buffer.toArray[ColumnView]), StringType)
+        cudf.ColumnVector.stringConcatenate(cols.toArray[ColumnView]), StringType)
     }
   }
 
   private def listConcat(batch: ColumnarBatch): GpuColumnVector = {
-    withResource(ArrayBuffer[cudf.ColumnVector]()) { buffer =>
-      // build input buffer
-      children.foreach {
-        buffer += columnarEvalToColumn(_, batch).getBase
-      }
+    withResource(children.safeMap(columnarEvalToColumn(_, batch).getBase())) {cols =>
       // run list concatenate
-      GpuColumnVector.from(cudf.ColumnVector.listConcatenateByRow(buffer: _*), dataType)
+      GpuColumnVector.from(cudf.ColumnVector.listConcatenateByRow(cols: _*), dataType)
+    }
+  }
+}
+
+case class GpuMapConcat(children: Seq[Expression]) extends GpuComplexTypeMergingExpression {
+
+  override lazy val hasSideEffects: Boolean =
+    GpuCreateMap.exceptionOnDupKeys || super.hasSideEffects
+
+  @transient override lazy val dataType: MapType = {
+    if (children.isEmpty) {
+      MapType(StringType, StringType)
+    } else {
+      super.dataType.asInstanceOf[MapType]
+    }
+  }
+
+  override def nullable: Boolean = children.exists(_.nullable)
+
+  override def columnarEval(batch: ColumnarBatch): Any = (dataType, children.length) match {
+    // Explicitly return null for empty concat as Spark, since cuDF doesn't support empty concat.
+    case (dt, 0) => GpuColumnVector.fromNull(batch.numRows(), dt)
+    // For single column concat, we pass the result of child node to avoid extra cuDF call.
+    case (_, 1) => children.head.columnarEval(batch)
+    case (dt, _) => {
+      withResource(children.safeMap(columnarEvalToColumn(_, batch).getBase())) {cols =>
+        withResource(cudf.ColumnVector.listConcatenateByRow(cols: _*)) {structs =>
+          GpuCreateMap.createMapFromKeysValuesAsStructs(dataType, structs)
+        }
+      }
     }
   }
 }
@@ -176,7 +197,14 @@ case class GpuElementAt(left: Expression, right: Expression, failOnError: Boolea
           }
         }
       case _: MapType =>
-        (_, _) => throw new UnsupportedOperationException("non-literal key is not supported")
+        (map, indices) => {
+          if (failOnError) {
+            GpuMapUtils.getMapValueOrThrow(map, indices, right.dataType, origin)
+          }
+          else {
+            map.getMapValue(indices)
+          }
+        }
     }
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): cudf.ColumnVector =
@@ -395,56 +423,6 @@ case class GpuSortArray(base: Expression, ascendingOrder: Expression)
   }
 }
 
-// TODO switch over to array aggregations once
-//  https://github.com/rapidsai/cudf/issues/10417 is done
-object SlowGpuArrayAgg extends Arm{
-  def reallySlow(input: GpuColumnVector, agg: GroupByAggregation): cudf.ColumnVector = {
-    val baseInput = input.getBase
-    val inputTab = withResource(Scalar.fromInt(0)) { zero =>
-      withResource(cudf.ColumnVector.sequence(zero, input.getRowCount.toInt)) { rowNums =>
-        new cudf.Table(rowNums, baseInput)
-      }
-    }
-
-    val explodedTab = withResource(inputTab) { inputTab =>
-      inputTab.explodeOuter(1)
-    }
-
-    val retTab = withResource(explodedTab) { explodedTab =>
-      explodedTab.groupBy(GroupByOptions.builder()
-          .withKeysSorted(true)
-          .withIgnoreNullKeys(true)
-          .build(), 0)
-          .aggregate(agg.onColumn(1))
-    }
-
-    withResource(retTab) { retTab =>
-      assert(retTab.getRowCount == baseInput.getRowCount)
-      retTab.getColumn(1).incRefCount()
-    }
-  }
-
-  def bitCastDecimal(
-      input: GpuColumnVector,
-      agg: SegmentedReductionAggregation,
-      tmpType: DType,
-      resultType: DType): cudf.ColumnVector = {
-    val base = input.getBase
-    val tmpResult = withResource(base.getChildColumnView(0)) { dataCol =>
-      withResource(dataCol.bitCastTo(tmpType)) { castDataCol =>
-        withResource(base.replaceListChild(castDataCol)) { bitCastInput =>
-          bitCastInput.listReduce(agg)
-        }
-      }
-    }
-    withResource(tmpResult) { tmpResult =>
-      withResource(tmpResult.bitCastTo(resultType)) { bitCastResult =>
-        bitCastResult.copyToColumnVector()
-      }
-    }
-  }
-}
-
 case class GpuArrayMin(child: Expression) extends GpuUnaryExpression with ImplicitCastInputTypes {
 
   override def nullable: Boolean = true
@@ -459,22 +437,7 @@ case class GpuArrayMin(child: Expression) extends GpuUnaryExpression with Implic
   override def prettyName: String = "array_min"
 
   override protected def doColumnar(input: GpuColumnVector): cudf.ColumnVector =
-    dataType match {
-      case StringType =>
-        SlowGpuArrayAgg.reallySlow(input, GroupByAggregation.min())
-      case dt: DecimalType =>
-        if (dt.precision > Decimal.MAX_LONG_DIGITS) {
-          SlowGpuArrayAgg.reallySlow(input, GroupByAggregation.min())
-        } else if (dt.precision > Decimal.MAX_INT_DIGITS) {
-          SlowGpuArrayAgg.bitCastDecimal(input, SegmentedReductionAggregation.min(),
-            DType.INT64, GpuColumnVector.getNonNestedRapidsType(dataType))
-        } else {
-          SlowGpuArrayAgg.bitCastDecimal(input, SegmentedReductionAggregation.min(),
-            DType.INT32, GpuColumnVector.getNonNestedRapidsType(dataType))
-        }
-      case _ =>
-        input.getBase.listReduce(SegmentedReductionAggregation.min())
-    }
+    input.getBase.listReduce(SegmentedReductionAggregation.min())
 }
 
 case class GpuArrayMax(child: Expression) extends GpuUnaryExpression with ImplicitCastInputTypes {
@@ -491,22 +454,7 @@ case class GpuArrayMax(child: Expression) extends GpuUnaryExpression with Implic
   override def prettyName: String = "array_max"
 
   override protected def doColumnar(input: GpuColumnVector): cudf.ColumnVector =
-    dataType match {
-      case StringType =>
-        SlowGpuArrayAgg.reallySlow(input, GroupByAggregation.max())
-      case dt: DecimalType =>
-        if (dt.precision > Decimal.MAX_LONG_DIGITS) {
-          SlowGpuArrayAgg.reallySlow(input, GroupByAggregation.max())
-        } else if (dt.precision > Decimal.MAX_INT_DIGITS) {
-          SlowGpuArrayAgg.bitCastDecimal(input, SegmentedReductionAggregation.max(),
-            DType.INT64, GpuColumnVector.getNonNestedRapidsType(dataType))
-        } else {
-          SlowGpuArrayAgg.bitCastDecimal(input, SegmentedReductionAggregation.max(),
-            DType.INT32, GpuColumnVector.getNonNestedRapidsType(dataType))
-        }
-      case _ =>
-        input.getBase.listReduce(SegmentedReductionAggregation.max())
-    }
+    input.getBase.listReduce(SegmentedReductionAggregation.max())
 }
 
 case class GpuArrayRepeat(left: Expression, right: Expression) extends GpuBinaryExpression {
@@ -727,6 +675,221 @@ case class GpuArraysZip(children: Seq[Expression]) extends GpuExpression with Sh
     // the output record will be null if any of input records is null.
     withResource(zipped) { _ =>
       zipped.mergeAndSetValidity(BinaryOp.BITWISE_AND, inputs: _*)
+    }
+  }
+}
+
+// Base class for GpuArrayExcept, GpuArrayUnion, GpuArrayIntersect 
+trait GpuArrayBinaryLike extends GpuComplexTypeMergingExpression with NullIntolerant {
+  val left: Expression
+  val right: Expression
+
+  @transient override final lazy val children: Seq[Expression] = IndexedSeq(left, right)
+
+  def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector
+  def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector
+  def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector
+  def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector
+
+  override def columnarEval(batch: ColumnarBatch): Any = {
+    withResourceIfAllowed(left.columnarEval(batch)) { lhs =>
+      withResourceIfAllowed(right.columnarEval(batch)) { rhs =>
+        (lhs, rhs) match {
+          case (l: GpuColumnVector, r: GpuColumnVector) =>
+            GpuColumnVector.from(doColumnar(l, r), dataType)
+          case (l: GpuScalar, r: GpuColumnVector) =>
+            GpuColumnVector.from(doColumnar(l, r), dataType)
+          case (l: GpuColumnVector, r: GpuScalar) =>
+            GpuColumnVector.from(doColumnar(l, r), dataType)
+          case (l: GpuScalar, r: GpuScalar) =>
+            GpuColumnVector.from(doColumnar(batch.numRows(), l, r), dataType)
+          case (l, r) =>
+            throw new UnsupportedOperationException(s"Unsupported data '($l: " +
+              s"${l.getClass}, $r: ${r.getClass})' for GPU binary expression.")
+        }
+      }
+    }
+  }
+}
+
+case class GpuArrayExcept(left: Expression, right: Expression)
+    extends GpuArrayBinaryLike with ExpectsInputTypes {
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(ArrayType, ArrayType)
+
+  override def checkInputDataTypes(): TypeCheckResult =
+    (left.dataType, right.dataType) match {
+    case (ArrayType(ldt, _), ArrayType(rdt, _)) =>
+      if (ldt.sameType(rdt)) {
+        TypeCheckResult.TypeCheckSuccess
+      } else {
+        TypeCheckResult.TypeCheckFailure(
+          s"Array_intersect requires both array params to have the same subType: $ldt != $rdt")
+      }
+    case dt =>
+      TypeCheckResult.TypeCheckFailure(s"$prettyName only supports array input, but found $dt")
+  }
+
+  override def nullable: Boolean = true
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
+    ColumnView.listsDifferenceDistinct(lhs.getBase, rhs.getBase)
+  }
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, rhs.getRowCount.toInt, lhs.dataType)) { left =>
+      doColumnar(left, rhs)
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(rhs, lhs.getRowCount.toInt, rhs.dataType)) { right =>
+      doColumnar(lhs, right)
+    }
+  }
+
+  override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, numRows, lhs.dataType)) { left =>
+      withResource(GpuColumnVector.from(rhs, numRows, rhs.dataType)) { right =>
+        doColumnar(left, right)
+      }
+    }
+  }
+}
+
+case class GpuArrayIntersect(left: Expression, right: Expression)
+    extends GpuArrayBinaryLike with ExpectsInputTypes {
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(ArrayType, ArrayType)
+
+  override def checkInputDataTypes(): TypeCheckResult =
+    (left.dataType, right.dataType) match {
+    case (ArrayType(ldt, _), ArrayType(rdt, _)) =>
+      if (ldt.sameType(rdt)) {
+        TypeCheckResult.TypeCheckSuccess
+      } else {
+        TypeCheckResult.TypeCheckFailure(
+          s"Array_intersect requires both array params to have the same subType: $ldt != $rdt")
+      }
+    case dt =>
+      TypeCheckResult.TypeCheckFailure(s"$prettyName only supports array input, but found $dt")
+  }
+
+  override def nullable: Boolean = true
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
+    ColumnView.listsIntersectDistinct(lhs.getBase, rhs.getBase)
+  }
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, rhs.getRowCount.toInt, lhs.dataType)) { left =>
+      doColumnar(left, rhs)
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(rhs, lhs.getRowCount.toInt, rhs.dataType)) { right =>
+      doColumnar(lhs, right)
+    }
+  }
+
+  override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, numRows, lhs.dataType)) { left =>
+      withResource(GpuColumnVector.from(rhs, numRows, rhs.dataType)) { right =>
+        doColumnar(left, right)
+      }
+    }
+  }
+}
+
+case class GpuArrayUnion(left: Expression, right: Expression)
+    extends GpuArrayBinaryLike with ExpectsInputTypes {
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(ArrayType, ArrayType)
+
+  override def checkInputDataTypes(): TypeCheckResult =
+    (left.dataType, right.dataType) match {
+    case (ArrayType(ldt, _), ArrayType(rdt, _)) =>
+      if (ldt.sameType(rdt)) {
+        TypeCheckResult.TypeCheckSuccess
+      } else {
+        TypeCheckResult.TypeCheckFailure(
+          s"Array_union requires both array params to have the same subType: $ldt != $rdt")
+      }
+    case dt =>
+      TypeCheckResult.TypeCheckFailure(s"$prettyName only supports array input, but found $dt")
+  }
+
+  override def nullable: Boolean = true
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
+    ColumnView.listsUnionDistinct(lhs.getBase, rhs.getBase)
+  }
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, rhs.getRowCount.toInt, lhs.dataType)) { left =>
+      doColumnar(left, rhs)
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(rhs, lhs.getRowCount.toInt, rhs.dataType)) { right =>
+      doColumnar(lhs, right)
+    }
+  }
+
+  override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, numRows, lhs.dataType)) { left =>
+      withResource(GpuColumnVector.from(rhs, numRows, rhs.dataType)) { right =>
+        doColumnar(left, right)
+      }
+    }
+  }
+}
+
+case class GpuArraysOverlap(left: Expression, right: Expression)
+    extends GpuBinaryExpression with ExpectsInputTypes with NullIntolerant {
+
+  override def inputTypes: Seq[AbstractDataType] = Seq(ArrayType, ArrayType)
+
+  override def checkInputDataTypes(): TypeCheckResult =
+    (left.dataType, right.dataType) match {
+    case (ArrayType(ldt, _), ArrayType(rdt, _)) =>
+      if (ldt.sameType(rdt)) {
+        TypeCheckResult.TypeCheckSuccess
+      } else {
+        TypeCheckResult.TypeCheckFailure(
+          s"Array_union requires both array params to have the same subType: $ldt != $rdt")
+      }
+    case dt =>
+      TypeCheckResult.TypeCheckFailure(s"$prettyName only supports array input, but found $dt")
+  }
+
+  override def dataType: DataType = BooleanType
+
+  override def nullable: Boolean = true
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
+    ColumnView.listsHaveOverlap(lhs.getBase, rhs.getBase)
+  }
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, rhs.getRowCount.toInt, lhs.dataType)) { left =>
+      doColumnar(left, rhs)
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(rhs, lhs.getRowCount.toInt, rhs.dataType)) { right =>
+      doColumnar(lhs, right)
+    }
+  }
+
+  override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, numRows, lhs.dataType)) { left =>
+      withResource(GpuColumnVector.from(rhs, numRows, rhs.dataType)) { right =>
+        doColumnar(left, right)
+      }
     }
   }
 }

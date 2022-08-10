@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2022, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,13 +28,16 @@ import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 trait GpuPartitioning extends Partitioning with Arm {
-  private[this] val (maxCompressionBatchSize, _useRapidsShuffle) = {
+  private[this] val (maxCompressionBatchSize, _useGPUShuffle, _useMultiThreadedShuffle) = {
     val rapidsConf = new RapidsConf(SQLConf.get)
     (rapidsConf.shuffleCompressionMaxBatchMemory,
-      GpuShuffleEnv.shouldUseRapidsShuffle(rapidsConf))
+      GpuShuffleEnv.useGPUShuffle(rapidsConf),
+      GpuShuffleEnv.useMultiThreadedShuffle(rapidsConf))
   }
 
-  def usesRapidsShuffle: Boolean = _useRapidsShuffle
+  def usesGPUShuffle: Boolean = _useGPUShuffle
+
+  def usesMultiThreadedShuffle: Boolean = _useMultiThreadedShuffle
 
   def sliceBatch(vectors: Array[RapidsHostColumnVector], start: Int, end: Int): ColumnarBatch = {
     var ret: ColumnarBatch = null
@@ -63,6 +66,10 @@ trait GpuPartitioning extends Partitioning with Arm {
               cts.foreach { ct => splits.append(GpuPackedTableColumn.from(ct)) }
             }
         }
+        // synchronize our stream to ensure we have caught up with contiguous split
+        // as downstream consumers (RapidsShuffleManager) will add hundreds of buffers
+        // to the spill framework, this makes it so here we synchronize once.
+        Cuda.DEFAULT_STREAM.sync()
         splits.toArray
       }
     } else {
@@ -100,7 +107,7 @@ trait GpuPartitioning extends Partitioning with Arm {
 
   def sliceInternalGpuOrCpu(numRows: Int, partitionIndexes: Array[Int],
       partitionColumns: Array[GpuColumnVector]): Array[ColumnarBatch] = {
-    val sliceOnGpu = usesRapidsShuffle
+    val sliceOnGpu = usesGPUShuffle
     val nvtxRangeKey = if (sliceOnGpu) {
       "sliceInternalOnGpu"
     } else {
@@ -108,15 +115,12 @@ trait GpuPartitioning extends Partitioning with Arm {
     }
     // If we are not using the Rapids shuffle we fall back to CPU splits way to avoid the hit
     // for large number of small splits.
-    val sliceRange = new NvtxRange(nvtxRangeKey, NvtxColor.CYAN)
-    try {
+    withResource(new NvtxRange(nvtxRangeKey, NvtxColor.CYAN)) { _ =>
       if (sliceOnGpu) {
         sliceInternalOnGpu(numRows, partitionIndexes, partitionColumns)
       } else {
         sliceInternalOnCpu(numRows, partitionIndexes, partitionColumns)
       }
-    } finally {
-      sliceRange.close()
     }
   }
 

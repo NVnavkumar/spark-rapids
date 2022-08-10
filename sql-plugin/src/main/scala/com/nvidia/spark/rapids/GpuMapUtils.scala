@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2022, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,13 @@ package com.nvidia.spark.rapids
 
 import java.util.Optional
 
-import ai.rapids.cudf.{ColumnView, DType}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableColumn
 
+import org.apache.spark.sql.catalyst.trees.Origin
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.shims.RapidsErrorUtils
+import org.apache.spark.sql.types.DataType
 
 /**
  * Provide a set of APIs to manipulate map columns in common ways. CUDF does not officially support
@@ -34,6 +37,41 @@ object GpuMapUtils extends Arm {
     withResource(input.getChildColumnView(0)) { structView =>
       withResource(structView.getChildColumnView(index)) { keyView =>
         GpuListUtils.replaceListDataColumnAsView(input, keyView)
+      }
+    }
+  }
+
+  def getMapValueOrThrow(
+      map: ColumnVector,
+      indices: ColumnVector,
+      dtype: DataType,
+      origin: Origin): ColumnVector = {
+    withResource(map.getMapKeyExistence(indices)) { keyExists =>
+      withResource(keyExists.all()) { exist =>
+        if (exist.isValid && exist.getBoolean) {
+          map.getMapValue(indices)
+        } else {
+          val firstFalseKey = getFirstFalseKey(indices, keyExists)
+          throw RapidsErrorUtils.mapKeyNotExistError(firstFalseKey, dtype, origin)
+        }
+      }
+    }
+  }
+
+  private def getFirstFalseKey(indices: ColumnVector, keyExists: ColumnVector): String = {
+    withResource(new ai.rapids.cudf.Table(Array(indices, keyExists):_*)) { table =>
+      withResource(keyExists.not()) { keyNotExist =>
+        withResource(table.filter(keyNotExist)) { tableWithBadKeys =>
+          val badKeys = tableWithBadKeys.getColumn(0)
+          withResource(badKeys.getScalarElement(0)) { firstBadKey =>
+            val key = GpuScalar.extract(firstBadKey)
+            if (key != null) {
+              key.toString
+            } else {
+              "null"
+            }
+          }
+        }
       }
     }
   }
@@ -134,30 +172,4 @@ object GpuMapUtils extends Arm {
         "the key inserted at last takes precedence.")
   }
 
-  /**
-   * In Spark there are two options to deal with duplicate keys in a map. The default is to throw
-   * an exception. This can handle that use case.
-   * @param mapView the view to check to see if it has duplicate keys or not.
-   */
-  def assertNoDuplicateKeys(mapView: ColumnView): Unit = {
-    val dedupeCountCol = withResource(getKeysAsListView(mapView)) { keyListView =>
-      withResource(keyListView.dropListDuplicates) { dupsDropped =>
-        dupsDropped.countElements()
-      }
-    }
-    val sameLengthCol = withResource(dedupeCountCol) { dedupeCountCol =>
-      withResource(mapView.countElements()) { origCount =>
-        origCount.equalToNullAware(dedupeCountCol)
-      }
-    }
-    withResource(sameLengthCol) { sameLengthCol =>
-      withResource(sameLengthCol.all()) { allSame =>
-        // If this is an empty batch allSame can be null, and we don't want to throw
-        // an exception for an empty batch
-        if (allSame.isValid && !allSame.getBoolean) {
-          throw duplicateMapKeyFoundError
-        }
-      }
-    }
-  }
 }

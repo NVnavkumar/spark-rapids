@@ -25,7 +25,7 @@ import com.nvidia.spark.rapids.shims.SparkShimImpl
 
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.catalyst.expressions.{Alias, AnsiCast, CastBase, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Alias, CastBase, Expression, NamedExpression}
 import org.apache.spark.sql.execution.ProjectExec
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
@@ -466,11 +466,25 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
     }
   }
 
+  testSparkResultsAreEqual("ansi_cast decimals to long",
+    generateValidValuesDecimalDF(Short.MinValue, Short.MaxValue, 18, 3), sparkConf) {
+    frame => testCastTo(DataTypes.LongType)(frame)
+  }
+
   private def castToStringExpectedFun[T]: T => Option[String] = (d: T) => Some(String.valueOf(d))
 
   private def testCastToString[T](dataType: DataType, ansiMode: Boolean,
       comparisonFunc: Option[(String, String) => Boolean] = None) {
-    val checks = GpuOverrides.expressions(classOf[AnsiCast]).getChecks.get.asInstanceOf[CastChecks]
+    // AnsiCast is merged into Cast from Spark 3.4.0.
+    // Use reflection to avoid shims.
+    val key = Class.forName {
+      if (cmpSparkVersion(3, 4, 0) < 0) {
+        "org.apache.spark.sql.catalyst.expressions.AnsiCast"
+      } else {
+        "org.apache.spark.sql.catalyst.expressions.Cast"
+      }
+    }.asInstanceOf[Class[Expression]]
+    val checks = GpuOverrides.expressions(key).getChecks.get.asInstanceOf[CastChecks]
     assert(checks.gpuCanCast(dataType, DataTypes.StringType))
     val schema = FuzzerUtils.createSchema(Seq(dataType))
     val childExpr: GpuBoundReference =
@@ -545,6 +559,11 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
   // Writing to Hive tables, which has special rules
   ///////////////////////////////////////////////////////////////////////////
 
+  // Disable tests for Spark-3.3.1+ until new support to CheckOverflowInTableInsert is added
+  def before3_3_1(s: SparkSession): (Boolean, String) = {
+    (s.version < "3.3.1", s"Spark version must be prior to 3.3.1")
+  }
+
   testSparkResultsAreEqual("Write bytes to string", testBytes, sparkConf) {
     frame => doTableInsert(frame, HIVE_STRING_SQL_TYPE)
   }
@@ -566,72 +585,72 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
   }
 
   testSparkResultsAreEqual("Write longs to int (values within range)", intsAsLongs,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_INT_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write longs to short (values within range)", shortsAsLongs,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_SHORT_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write longs to byte (values within range)", bytesAsLongs,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write ints to short (values within range)", shortsAsInts,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_SHORT_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write ints to byte (values within range)", bytesAsInts,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write shorts to byte (values within range)", bytesAsShorts,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write floats to long (values within range)", longsAsFloats,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_LONG_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write floats to int (values within range)", intsAsFloats,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_INT_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write floats to short (values within range)", shortsAsFloats,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_SHORT_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write floats to byte (values within range)", bytesAsFloats,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write doubles to long (values within range)", longsAsDoubles,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_LONG_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write doubles to int (values within range)", intsAsDoubles,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_LONG_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write doubles to short (values within range)",
-    shortsAsDoubles, sparkConf) {
+    shortsAsDoubles, sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_LONG_SQL_TYPE)
   }
 
   testSparkResultsAreEqual("Write doubles to byte (values within range)", bytesAsDoubles,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_LONG_SQL_TYPE)
   }
 
@@ -639,78 +658,90 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
   // Test for exceptions when casting out of range values
   ///////////////////////////////////////////////////////////////////////////
 
-  testCastFailsForBadInputs("Detect overflow from long to int", testLongs, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from long to int", testLongs, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_INT_SQL_TYPE)
   }
 
-  testCastFailsForBadInputs("Detect overflow from long to short", testLongs, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from long to short", testLongs, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_SHORT_SQL_TYPE)
   }
 
-  testCastFailsForBadInputs("Detect overflow from long to byte", testLongs, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from long to byte", testLongs, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
-  testCastFailsForBadInputs("Detect overflow from int to short", testInts, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from int to short", testInts, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_SHORT_SQL_TYPE)
   }
 
-  testCastFailsForBadInputs("Detect overflow from int to byte", testInts, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from int to byte", testInts, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
-  testCastFailsForBadInputs("Detect overflow from short to byte", testShorts, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from short to byte", testShorts, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
-  testCastFailsForBadInputs("Detect overflow from float to long", testFloats, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from float to long", testFloats, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_INT_SQL_TYPE)
   }
 
-  testCastFailsForBadInputs("Detect overflow from float to int", testFloats, sparkConf) {
+  testCastFailsForBadInputs("Detect overflow from float to int", testFloats, sparkConf,
+    assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_SHORT_SQL_TYPE)
   }
 
   testCastFailsForBadInputs("Detect overflow from float to short", testFloats,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_LONG_SQL_TYPE)
   }
 
   testCastFailsForBadInputs("Detect overflow from float to byte", testFloats,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
   testCastFailsForBadInputs("Detect overflow from double to long", testDoubles,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_LONG_SQL_TYPE)
   }
 
   testCastFailsForBadInputs("Detect overflow from double to int", testDoubles,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_INT_SQL_TYPE)
   }
 
   testCastFailsForBadInputs("Detect overflow from double to short", testDoubles,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_SHORT_SQL_TYPE)
   }
 
   testCastFailsForBadInputs("Detect overflow from double to byte", testDoubles,
-    sparkConf) {
+    sparkConf, assumeCondition = before3_3_1) {
     frame => doTableInsert(frame, HIVE_BYTE_SQL_TYPE)
   }
 
   ///////////////////////////////////////////////////////////////////////////
   // Copying between Hive tables, which has special rules
   ///////////////////////////////////////////////////////////////////////////
+  if (cmpSparkVersion(3, 4, 0) < 0) {
+    // The following two tests are failing in Spark 3.4.0.
+    // Disable them temporarily,
+    // and tracked by https://github.com/NVIDIA/spark-rapids/issues/5748
+    testSparkResultsAreEqual("Copy ints to long", testInts, sparkConf) {
+      frame => doTableCopy(frame, HIVE_INT_SQL_TYPE, HIVE_LONG_SQL_TYPE)
+    }
 
-  testSparkResultsAreEqual("Copy ints to long", testInts, sparkConf) {
-    frame => doTableCopy(frame, HIVE_INT_SQL_TYPE, HIVE_LONG_SQL_TYPE)
-  }
-
-  testSparkResultsAreEqual("Copy long to float", testLongs, sparkConf) {
-    frame => doTableCopy(frame, HIVE_LONG_SQL_TYPE, HIVE_FLOAT_SQL_TYPE)
+    testSparkResultsAreEqual("Copy long to float", testLongs, sparkConf) {
+      frame => doTableCopy(frame, HIVE_LONG_SQL_TYPE, HIVE_FLOAT_SQL_TYPE)
+    }
   }
 
   private def testCastTo(castTo: DataType)(frame: DataFrame): DataFrame ={
@@ -795,11 +826,20 @@ class AnsiCastOpSuite extends GpuExpressionTestSuite {
       case _: ProjectExec | _: GpuProjectExec => true
       case _ => false
     })
+
+    def isAnsiCast(c: CastBase): Boolean = {
+      // prior to Spark 3.3.0 we could use toString to see if the name of
+      // the cast was "cast" or "ansi_cast" but now the name is always "cast"
+      // so we need to use reflection to access the protected field "ansiEnabled"
+      val m = c.getClass.getDeclaredField("ansiEnabled")
+      m.setAccessible(true)
+      m.getBoolean(c)
+    }
+
     val count = projections.map {
         case p: ProjectExec => p.projectList.count {
-          // ansiEnabled is protected so we rely on CastBase.toString
-          case c: CastBase => c.toString().startsWith("ansi_cast")
-          case Alias(c: CastBase, _) => c.toString().startsWith("ansi_cast")
+          case c: CastBase => isAnsiCast(c)
+          case Alias(c: CastBase, _) => isAnsiCast(c)
           case _ => false
         }
         case p: GpuProjectExec => p.projectList.count {

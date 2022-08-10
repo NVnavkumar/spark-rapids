@@ -45,7 +45,7 @@ NM_hostname_2
 
    - Download Alluxio binary file
 
-      Download the latest Alluxio binary file (2.4.1-1) **alluxio-${LATEST}-bin.tar.gz** from
+      Download the latest Alluxio binary file **alluxio-${LATEST}-bin.tar.gz** from
       [this site](https://www.alluxio.io/download/).
 
    - Copy `alluxio-${LATEST}-bin.tar.gz` to NodeManagers and ResourceManager
@@ -198,28 +198,7 @@ NM_hostname_2
       more about this topic, please refer to the
       [tiered storage document](https://docs.alluxio.io/os/user/stable/en/core-services/Caching.html#multiple-tier-storage).
 
-3. Mount an existing data storage to Alluxio
-
-   - Mount S3 bucket
-
-      ``` bash
-      ${ALLUXIO_HOME}/bin/alluxio fs mount \
-         --option aws.accessKeyId=<AWS_ACCESS_KEY_ID> \
-         --option aws.secretKey=<AWS_SECRET_KEY_ID> \
-         alluxio://RM_hostname:19998/s3 s3a://<S3_BUCKET>/<S3_DIRECTORY>
-      ```
-
-   - Mount Azure directory
-
-      ``` bash
-      ${ALLUXIO_HOME}/bin/alluxio fs mount \
-      --option fs.azure.account.key.<AZURE_ACCOUNT>.blob.core.windows.net=<AZURE_ACCESS_KEY> \
-      alluxio://master:port/azure wasb://<AZURE_CONTAINER>@<AZURE_ACCOUNT>.blob.core.windows.net/<AZURE_DIRECTORY>/
-      ```
-
-   For other filesystems, please refer to [this site](https://www.alluxio.io/).
-
-4. Start Alluxio cluster
+3. Start Alluxio cluster
 
    - Format Alluxio
 
@@ -242,12 +221,37 @@ NM_hostname_2
 
    - Verify Alluxio
 
-      To verify that Alluxio is running, visit [http://RM_hostname:19999](http://RM_hostname:19999)
+      To verify that Alluxio is running, visit `http://RM_hostname:19999`
       to see the status page of the Alluxio master.
+
+4. Mount an existing data storage to Alluxio
+
+    - Mount S3 bucket
+
+       ``` bash
+       ${ALLUXIO_HOME}/bin/alluxio fs mount \
+          --option aws.accessKeyId=<AWS_ACCESS_KEY_ID> \
+          --option aws.secretKey=<AWS_SECRET_KEY_ID> \
+          alluxio://RM_hostname:19998/s3 s3a://<S3_BUCKET>/<S3_DIRECTORY>
+       ```
+
+    - Mount Azure directory
+
+       ``` bash
+       ${ALLUXIO_HOME}/bin/alluxio fs mount \
+       --option fs.azure.account.key.<AZURE_ACCOUNT>.blob.core.windows.net=<AZURE_ACCESS_KEY> \
+       alluxio://master:port/azure wasb://<AZURE_CONTAINER>@<AZURE_ACCOUNT>.blob.core.windows.net/<AZURE_DIRECTORY>/
+       ```
+
+   For other filesystems, please refer to [this site](https://www.alluxio.io/).
+   We also provide auto mount feature for an easier usage.
+   Please refer to [Alluxio auto mount for AWS S3 buckets](#alluxio-auto-mount-for-aws-s3-buckets)
 
 ## RAPIDS Configuration
 
 There are two ways to leverage Alluxio in RAPIDS.
+We also provide an auto mount way for AWS S3 bucket if you install Alluxio in your Spark cluster.
+Please refer to [Alluxio auto mount for AWS S3 buckets](#alluxio-auto-mount-for-aws-s3-buckets)
 
 1. Explicitly specify the Alluxio path
 
@@ -311,6 +315,44 @@ There are two ways to leverage Alluxio in RAPIDS.
       --conf spark.rapids.alluxio.pathsToReplace="REPLACEMENT_RULES" \
       --conf spark.executor.extraJavaOptions="-Dalluxio.conf.dir=${ALLUXIO_HOME}/conf" \
    ```
+
+## Alluxio auto mount for AWS S3 buckets
+
+There's a more user-friendly way to use Alluxio with RAPIDS when accessing S3 buckets.
+Suppose that a user has multiple buckets on AWS S3.
+To use `spark.rapids.alluxio.pathsToReplace` requires to mount all the buckets beforehand
+and put the path replacement one by one into this config. It'll be boring when there're many buckets.
+
+To solve this problem, we add a new feature of Alluxio auto mount, which can mount the S3 buckets
+automatically when finding them from the input path in the Spark driver.
+This feature requires the node running Spark driver has Alluxio installed,
+which means the node is also the master of Alluxio cluster. It will use `alluxio fs mount` command to
+mount the buckets in Alluxio. And the uid used to run the Spark application can run alluxio command.
+For example, the uid of Spark application is as same as the uid of Alluxio service
+or the uid of Spark application can use `su alluxio_uid` to run alluxio command.
+
+To enable the Alluxio auto mount feature, the simplest way is only to enable it by below config
+without setting `spark.rapids.alluxio.pathsToReplace`, which takes precedence over auto mount feature.
+``` shell
+--conf spark.rapids.alluxio.automount.enabled=true
+```
+If Alluxio is not installed in /opt/alluxio-2.8.0, you should set the environment variable `ALLUXIO_HOME`.
+
+Additional configs:
+``` shell
+--conf spark.rapids.alluxio.bucket.regex="^s3a{0,1}://.*"
+```
+The regex is used to match the s3 URI, to decide which bucket we should auto mount.
+The default value is to match all the URIs which start with `s3://` or `s3a://`.
+For exmaple, `^s3a{1,1}://foo.*` will match the buckets which start with `foo`.
+
+```shell
+--conf spark.rapids.alluxio.cmd="su,ubuntu,-c,/opt/alluxio-2.8.0/bin/alluxio"
+```
+This cmd config defines a sequence to be used run the alluxio command by a specific user,
+mostly the user with Alluxio permission. We run the command by user `ubuntu` as default.
+If you have a different user and command path, you can redefine it.
+The default value is suitable for the case of running Alluxio with RAPIDS on Databricks.
 
 ## Alluxio Troubleshooting
 

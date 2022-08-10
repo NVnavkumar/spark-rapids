@@ -11,16 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 
 import pytest
 
-from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect, \
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal, \
     assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_py4j_exception
 from data_gen import *
 from marks import *
+import pyarrow as pa
+import pyarrow.parquet as pa_pq
 from pyspark.sql.types import *
 from pyspark.sql.functions import *
-from spark_session import with_cpu_session, with_gpu_session, is_before_spark_330
+from spark_session import with_cpu_session, with_gpu_session, is_before_spark_320, is_before_spark_330, is_spark_321cdh
 from conftest import is_databricks_runtime
 
 
@@ -76,12 +79,13 @@ native_coalesce_parquet_file_reader_conf = {'spark.rapids.sql.format.parquet.rea
 
 # For now the native configs are not compatible with spark.sql.parquet.writeLegacyFormat written files
 # for nested types
-reader_opt_confs = [original_parquet_file_reader_conf, multithreaded_parquet_file_reader_conf,
-                    coalesce_parquet_file_reader_conf, native_parquet_file_reader_conf,
-                    native_multithreaded_parquet_file_reader_conf, native_coalesce_parquet_file_reader_conf]
+reader_opt_confs_native = [native_parquet_file_reader_conf, native_multithreaded_parquet_file_reader_conf,
+                    native_coalesce_parquet_file_reader_conf]
 
 reader_opt_confs_no_native = [original_parquet_file_reader_conf, multithreaded_parquet_file_reader_conf,
                     coalesce_parquet_file_reader_conf]
+
+reader_opt_confs = reader_opt_confs_native + reader_opt_confs_no_native
 
 @pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
@@ -123,7 +127,72 @@ def test_parquet_fallback(spark_tmp_path, read_func, disable_conf):
             conf={disable_conf: 'false',
                 "spark.sql.sources.useV1SourceList": "parquet"})
 
+@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
+@pytest.mark.parametrize('binary_as_string', [True, False])
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_read_round_trip_binary(std_input_path, read_func, binary_as_string, reader_confs):
+    data_path = std_input_path + '/binary_as_string.parquet'
+
+    all_confs = copy_and_update(reader_confs, {
+        'spark.sql.parquet.binaryAsString': binary_as_string,
+        # set the int96 rebase mode values because its LEGACY in databricks which will preclude this op from running on GPU
+        'spark.sql.legacy.parquet.int96RebaseModeInRead' : 'CORRECTED',
+        'spark.sql.legacy.parquet.datetimeRebaseModeInRead': 'CORRECTED'})
+    # once https://github.com/NVIDIA/spark-rapids/issues/1126 is in we can remove spark.sql.legacy.parquet.datetimeRebaseModeInRead config which is a workaround
+    # for nested timestamp/date support
+    assert_gpu_and_cpu_are_equal_collect(read_func(data_path),
+                                         conf=all_confs)
+
+@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
+@pytest.mark.parametrize('binary_as_string', [True, False])
+def test_binary_df_read(spark_tmp_path, binary_as_string, read_func):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    with_cpu_session(lambda spark: unary_op_df(spark, StringGen()).selectExpr("cast(a as binary)").write.parquet(data_path))
+    all_confs = {
+        'spark.sql.parquet.binaryAsString': binary_as_string,
+        # set the int96 rebase mode values because its LEGACY in databricks which will preclude this op from running on GPU
+        'spark.sql.legacy.parquet.int96RebaseModeInRead': 'CORRECTED',
+        'spark.sql.legacy.parquet.datetimeRebaseModeInRead': 'CORRECTED'}
+    assert_gpu_and_cpu_are_equal_collect(read_func(data_path), conf=all_confs)
+
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+def test_parquet_read_forced_binary_schema(std_input_path, v1_enabled_list):
+    data_path = std_input_path + '/binary_as_string.parquet'
+
+    all_confs = copy_and_update(reader_opt_confs[0], {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        # set the int96 rebase mode values because its LEGACY in databricks which will preclude this op from running on GPU
+        'spark.sql.legacy.parquet.int96RebaseModeInRead' : 'CORRECTED',
+        'spark.sql.legacy.parquet.datetimeRebaseModeInRead': 'CORRECTED'})
+    # once https://github.com/NVIDIA/spark-rapids/issues/1126 is in we can remove spark.sql.legacy.parquet.datetimeRebaseModeInRead config which is a workaround
+    # for nested timestamp/date support
+
+    # This forces a Binary Column to a String Column and a String Column to a Binary Column.
+    schema = StructType([StructField("a", LongType()), StructField("b", StringType()), StructField("c", BinaryType())])
+    assert_gpu_and_cpu_are_equal_collect(lambda spark : spark.read.schema(schema).parquet(data_path),
+            conf=all_confs)
+
+@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+def test_parquet_read_round_trip_binary_as_string(std_input_path, read_func, reader_confs, v1_enabled_list):
+    data_path = std_input_path + '/binary_as_string.parquet'
+
+    all_confs = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.parquet.binaryAsString': 'true',
+        # set the int96 rebase mode values because its LEGACY in databricks which will preclude this op from running on GPU
+        'spark.sql.legacy.parquet.int96RebaseModeInRead' : 'CORRECTED',
+        'spark.sql.legacy.parquet.datetimeRebaseModeInRead': 'CORRECTED'})
+    # once https://github.com/NVIDIA/spark-rapids/issues/1126 is in we can remove spark.sql.legacy.parquet.datetimeRebaseModeInRead config which is a workaround
+    # for nested timestamp/date support
+    assert_gpu_and_cpu_are_equal_collect(read_func(data_path),
+            conf=all_confs)
+
 parquet_compress_options = ['none', 'uncompressed', 'snappy', 'gzip']
+# zstd is available in spark 3.2.0 and later.
+if not is_before_spark_320():
+    parquet_compress_options.append('zstd')
 # The following need extra jars 'lzo', 'lz4', 'brotli', 'zstd'
 # https://github.com/NVIDIA/spark-rapids/issues/143
 
@@ -236,7 +305,7 @@ def test_ts_read_fails_datetime_legacy(gen, spark_tmp_path, ts_write, ts_rebase,
                                           [ArrayGen(decimal_gen_32bit, max_length=10)],
                                           [StructGen([['child0', decimal_gen_32bit]])]], ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs_no_native)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_decimal_read_legacy(spark_tmp_path, parquet_gens, read_func, reader_confs, v1_enabled_list):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
@@ -390,6 +459,17 @@ def test_parquet_read_merge_schema_from_conf(spark_tmp_path, v1_enabled_list, re
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : spark.read.parquet(data_path),
             conf=all_confs)
+
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+def test_read_parquet_with_empty_clipped_schema(spark_tmp_path, v1_enabled_list, reader_confs):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    with_cpu_session(
+        lambda spark: gen_df(spark, [('a', int_gen)], length=100).write.parquet(data_path))
+    schema = StructType([StructField('b', IntegerType()), StructField('c', StringType())])
+    all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).parquet(data_path), conf=all_confs)
 
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
@@ -784,25 +864,170 @@ def test_parquet_read_with_corrupt_files(spark_tmp_path, reader_confs, v1_enable
             lambda spark : spark.read.parquet(first_data_path, second_data_path, third_data_path),
             conf=all_confs)
 
-# should fallback when trying to read with field ID
-@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
-@allow_non_gpu("FileSourceScanExec", "ColumnarToRowExec")
-def test_parquet_read_field_id(spark_tmp_path):
-    data_path = spark_tmp_path + '/PARQUET_DATA'
-    schema = StructType([
-        StructField("c1", IntegerType(), metadata={'parquet.field.id' : 1}),
-    ])
-    data = [(1,),(2,),(3,),]
-    # write parquet with field IDs
-    with_cpu_session(lambda spark :spark.createDataFrame(data, schema).coalesce(1).write.mode("overwrite").parquet(data_path))
+def with_id(i):
+    return {'parquet.field.id': i}
 
-    readSchema = StructType([
-        StructField("mapped_name_xxx", IntegerType(), metadata={'parquet.field.id' : 1}),
+# Field ID test cases were re-written from:
+# https://github.com/apache/spark/blob/v3.3.0-rc3/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFieldIdIOSuite.scala
+@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
+def test_parquet_read_field_id_using_correctly(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    write_schema = StructType([StructField("random", IntegerType(), metadata=with_id(1)),
+                               StructField("name", StringType(), metadata=with_id(0))])
+    write_data = [(100, 'text'), (200, 'more')]
+    # write parquet with field IDs
+    with_cpu_session(lambda spark: spark.createDataFrame(write_data, write_schema).repartition(1)
+                     .write.mode("overwrite").parquet(data_path),
+                     conf=enable_parquet_field_id_write)
+
+    # use field IDs to specify the reading columns, then mapping the column names
+    # map column `name` to `a`, map column `random` to `b`
+    read_schema = StructType([
+        StructField("a", StringType(), True, metadata=with_id(0)),
+        StructField("b", IntegerType(), True, metadata=with_id(1)),
     ])
-    assert_gpu_fallback_collect(
-            lambda spark: spark.read.schema(readSchema).parquet(data_path),
-            'FileSourceScanExec',
-            {"spark.sql.parquet.fieldId.read.enabled": "true"}) # default is false
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path),
+        conf=enable_parquet_field_id_read)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path).where("b < 50"),
+        conf=enable_parquet_field_id_read)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path).where("a >= 'oh'"),
+        conf=enable_parquet_field_id_read)
+
+    read_schema_mixed = StructType([
+        StructField("name", StringType(), True),
+        StructField("b", IntegerType(), True, metadata=with_id(1)),
+    ])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema_mixed).parquet(data_path),
+        conf=enable_parquet_field_id_read)
+
+    read_schema_mixed_half_matched = StructType([
+        StructField("unmatched", StringType(), True),
+        StructField("b", IntegerType(), True, metadata=with_id(1)),
+    ])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema_mixed_half_matched).parquet(data_path),
+        conf=enable_parquet_field_id_read)
+
+    # not specify schema
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).where("name >= 'oh'"),
+        conf=enable_parquet_field_id_read)
+
+@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
+def test_parquet_read_field_id_absence(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    write_schema = StructType([StructField("a", IntegerType(), metadata=with_id(3)),
+                               StructField("randomName", StringType())])
+    write_data = [(100, 'text'), (200, 'more')]
+    # write parquet with field IDs
+    with_cpu_session(lambda spark: spark.createDataFrame(write_data, write_schema).repartition(1)
+                     .write.mode("overwrite").parquet(data_path),
+                     conf=enable_parquet_field_id_write)
+
+    # 3 different cases for the 3 columns to read:
+    #   - a: ID 1 is not found, but there is column with name `a`, still return null
+    #   - b: ID 2 is not found, return null
+    #   - c: ID 3 is found, read it
+    read_schema = StructType([
+        StructField("a", IntegerType(), True, metadata=with_id(1)),
+        StructField("b", StringType(), True, metadata=with_id(2)),
+        StructField("c", IntegerType(), True, metadata=with_id(3)),
+    ])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path),
+        conf=enable_parquet_field_id_read)
+
+@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
+def test_parquet_read_multiple_field_id_matches(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    write_schema = StructType([
+        StructField("a", IntegerType(), True, metadata=with_id(1)),  # duplicated field ID
+        StructField("rand1", StringType(), True, metadata=with_id(2)),
+        StructField("rand2", StringType(), True, metadata=with_id(1)),  # duplicated field ID
+    ])
+    write_data = [(100, 'text', 'txt'), (200, 'more', 'mr')]
+    # write parquet with field IDs
+    with_cpu_session(lambda spark: spark.createDataFrame(write_data, write_schema).repartition(1)
+                     .write.mode("overwrite").parquet(data_path),
+                     conf=enable_parquet_field_id_write)
+
+    read_schema = StructType([StructField("a", IntegerType(), True, metadata=with_id(1))])
+    # Both CPU and GPU invokes `ParquetReadSupport.clipParquetSchema` which throws an exception
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path).collect(),
+        conf=enable_parquet_field_id_read,
+        error_message="Found duplicate field(s)")
+
+@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
+def test_parquet_read_without_field_id(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    # Parquet without field ID
+    write_schema = StructType([
+        StructField("a", IntegerType(), True),
+        StructField("rand1", StringType(), True),
+        StructField("rand2", StringType(), True),
+    ])
+    write_data = [(100, 'text', 'txt'), (200, 'more', 'mr')]
+    # write parquet with field IDs
+    with_cpu_session(lambda spark: spark.createDataFrame(write_data, write_schema).repartition(1)
+                     .write.mode("overwrite").parquet(data_path),
+                     conf=enable_parquet_field_id_write)
+    read_schema = StructType([StructField("a", IntegerType(), True, metadata=with_id(1))])
+
+    # Spark read schema expects field Ids, but Parquet file schema doesn't contain any field Ids.
+    # If `spark.sql.parquet.fieldId.read.ignoreMissing` is false(default value), throws exception
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path).collect(),
+        conf=enable_parquet_field_id_read,
+        error_message="Parquet file schema doesn't contain any field Ids")
+
+    # Spark read schema expects field Ids, but Parquet file schema doesn't contain any field Ids.
+    # If `spark.sql.parquet.fieldId.read.ignoreMissing` is true,
+    # return a column with all values are null for the unmatched field IDs
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path),
+        conf=copy_and_update(enable_parquet_field_id_read,
+                             {"spark.sql.parquet.fieldId.read.ignoreMissing": "true"}))
+
+#  test global config: field_id_write_enable=false, field_id_read_enable=true
+#  test global config: field_id_write_enable=true,  field_id_read_enable=true
+@pytest.mark.skipif(is_before_spark_330(), reason='Field ID is not supported before Spark 330')
+def test_parquet_read_field_id_global_flags(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    write_schema = StructType([
+        StructField("a", IntegerType(), True, metadata=with_id(1)),
+        StructField("rand1", StringType(), True, metadata=with_id(2)),
+        StructField("rand2", StringType(), True, metadata=with_id(3)),
+    ])
+    read_schema = StructType([
+        StructField("some", IntegerType(), True, metadata=with_id(1)),
+        StructField("other", StringType(), True, metadata=with_id(2)),
+        StructField("name", StringType(), True, metadata=with_id(3)),
+    ])
+    write_data = [(100, "text", "txt"), (200, "more", "mr")]
+
+    # not write field IDs into Parquet file although `write_schema` contains field IDs
+    # try to read by field IDs
+    with_cpu_session(lambda spark: spark.createDataFrame(write_data, write_schema).repartition(1)
+                     .write.mode("overwrite").parquet(data_path),
+                     conf=disable_parquet_field_id_write)
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path).collect(),
+        conf=enable_parquet_field_id_read,
+        error_message="Parquet file schema doesn't contain any field Ids")
+
+    # write field IDs into Parquet
+    # read by field IDs
+    with_cpu_session(lambda spark: spark.createDataFrame(write_data, write_schema).repartition(1)
+                     .write.mode("overwrite").parquet(data_path),
+                     conf=enable_parquet_field_id_write)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path),
+        conf=enable_parquet_field_id_read)
 
 @pytest.mark.skipif(is_before_spark_330(), reason='DayTimeInterval is not supported before Pyspark 3.3.0')
 def test_parquet_read_daytime_interval_cpu_file(spark_tmp_path):
@@ -867,6 +1092,24 @@ def test_parquet_int32_downcast(spark_tmp_path, reader_confs, v1_enabled_list):
         lambda spark: spark.read.schema(read_schema).parquet(data_path),
         conf=conf)
 
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+def test_parquet_nested_column_missing(spark_tmp_path, reader_confs, v1_enabled_list):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    write_schema = [("a", string_gen), ("b", int_gen), ("c", StructGen([("ca", long_gen)]))]
+    with_cpu_session(
+        lambda spark: gen_df(spark, write_schema).write.parquet(data_path))
+
+    read_schema = StructType([StructField("a", StringType()),
+                              StructField("b", IntegerType()),
+                              StructField("c", StructType([
+                                  StructField("ca", LongType()),
+                                  StructField("cb", StringType())]))])
+    conf = copy_and_update(reader_confs,
+                           {'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path),
+        conf=conf)
 
 def test_parquet_check_schema_compatibility(spark_tmp_path):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -878,14 +1121,14 @@ def test_parquet_check_schema_compatibility(spark_tmp_path):
     assert_gpu_and_cpu_error(
         lambda spark: spark.read.schema(read_int_as_long).parquet(data_path).collect(),
         conf={},
-        error_message='Parquet column cannot be converted in')
+        error_message='Parquet column cannot be converted')
 
     read_dec32_as_dec64 = StructType(
         [StructField('int', IntegerType()), StructField('dec32', DecimalType(15, 10))])
     assert_gpu_and_cpu_error(
         lambda spark: spark.read.schema(read_dec32_as_dec64).parquet(data_path).collect(),
         conf={},
-        error_message='Parquet column cannot be converted in')
+        error_message='Parquet column cannot be converted')
 
 
 # For nested types, GPU throws incompatible exception with a different message from CPU.
@@ -902,32 +1145,80 @@ def test_parquet_check_schema_compatibility_nested_types(spark_tmp_path):
     assert_py4j_exception(
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(read_array_long_as_int).parquet(data_path).collect()),
-        error_message='Parquet column cannot be converted in')
+        error_message='Parquet column cannot be converted')
 
     read_arr_arr_int_as_long = StructType(
         [StructField('array_array_int', ArrayType(ArrayType(LongType())))])
     assert_py4j_exception(
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(read_arr_arr_int_as_long).parquet(data_path).collect()),
-        error_message='Parquet column cannot be converted in')
+        error_message='Parquet column cannot be converted')
 
     read_struct_flt_as_dbl = StructType([StructField(
         'struct_float', StructType([StructField('f', DoubleType())]))])
     assert_py4j_exception(
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(read_struct_flt_as_dbl).parquet(data_path).collect()),
-        error_message='Parquet column cannot be converted in')
+        error_message='Parquet column cannot be converted')
 
     read_struct_arr_int_as_long = StructType([StructField(
         'struct_array_int', StructType([StructField('a', ArrayType(LongType()))]))])
     assert_py4j_exception(
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(read_struct_arr_int_as_long).parquet(data_path).collect()),
-        error_message='Parquet column cannot be converted in')
+        error_message='Parquet column cannot be converted')
 
     read_map_str_str_as_str_int = StructType([StructField(
         'map', MapType(StringType(), IntegerType()))])
     assert_py4j_exception(
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(read_map_str_str_as_str_int).parquet(data_path).collect()),
-        error_message='Parquet column cannot be converted in')
+        error_message='Parquet column cannot be converted')
+
+@pytest.mark.skipif(is_before_spark_320() or is_spark_321cdh(), reason='Encryption is not supported before Spark 3.2.0 or Parquet < 1.12')
+@pytest.mark.skipif(os.environ.get('INCLUDE_PARQUET_HADOOP_TEST_JAR', 'false') == 'false', reason='INCLUDE_PARQUET_HADOOP_TEST_JAR is disabled')
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_read_encryption(spark_tmp_path, reader_confs, v1_enabled_list):
+
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    gen_list = [('one', int_gen), ('two', byte_gen), ('THREE', boolean_gen)]
+
+    encryption_confs = {
+        'parquet.encryption.kms.client.class': 'org.apache.parquet.crypto.keytools.mocks.InMemoryKMS',
+        'parquet.encryption.key.list': 'keyA:AAECAwQFBgcICQoLDA0ODw== ,  keyB:AAECAAECAAECAAECAAECAA==',
+        'parquet.crypto.factory.class': 'org.apache.parquet.crypto.keytools.PropertiesDrivenCryptoFactory'
+    }
+
+    conf = copy_and_update(reader_confs, encryption_confs)
+
+    with_cpu_session(
+        lambda spark : gen_df(spark, gen_list).write.
+            option("parquet.encryption.column.keys" , "keyA:one").
+            option("parquet.encryption.footer.key" , "keyB").
+            parquet(data_path), conf=encryption_confs)
+
+    # test with missing encryption conf reading encrypted file
+    assert_py4j_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.parquet(data_path).collect()),
+        error_message='Could not read footer for file')
+
+    assert_py4j_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.parquet(data_path).collect(), conf=conf),
+        error_message='The GPU does not support reading encrypted Parquet files')
+
+def test_parquet_read_count(spark_tmp_path):
+    parquet_gens = [int_gen, string_gen, double_gen]
+    gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+
+    with_cpu_session(lambda spark: gen_df(spark, gen_list).write.parquet(data_path))
+
+    assert_gpu_and_cpu_row_counts_equal(lambda spark: spark.read.parquet(data_path))
+
+    # assert the spark plan of the equivalent SQL query contains no column in read schema
+    assert_cpu_and_gpu_are_equal_sql_with_capture(
+        lambda spark: spark.read.parquet(data_path), "SELECT COUNT(*) FROM tab", "tab",
+        exist_classes=r'GpuFileGpuScan parquet .* ReadSchema: struct<>')

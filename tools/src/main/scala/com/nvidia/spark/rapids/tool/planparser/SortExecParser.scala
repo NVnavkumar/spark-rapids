@@ -30,12 +30,16 @@ case class SortExecParser(
   override def parse: ExecInfo = {
     // Sort doesn't have duration
     val duration = None
-    val (speedupFactor, isSupported) = if (checker.isExecSupported(fullExecName)) {
+    val exprString = node.desc.replaceFirst("Sort ", "")
+    val expressions = SQLPlanParser.parseSortExpressions(exprString)
+    val isAllExprsSupported = expressions.forall(expr => checker.isExprSupported(expr))
+    val (speedupFactor, isSupported) = if (checker.isExecSupported(fullExecName) &&
+        isAllExprsSupported) {
       (checker.getSpeedupFactor(fullExecName), true)
     } else {
-      (1, false)
+      (1.0, false)
     }
     // TODO - add in parsing expressions - average speedup across?
-    ExecInfo(sqlID, node.name, "", speedupFactor, duration, node.id, isSupported, None)
+    new ExecInfo(sqlID, node.name, "", speedupFactor, duration, node.id, isSupported, None)
   }
 }

@@ -22,8 +22,6 @@ from spark_session import is_before_spark_330, is_databricks104_or_later
 from pyspark.sql.types import *
 from pyspark.sql.types import IntegralType
 
-# Mark all tests in current file as premerge_ci_1 in order to be run in first k8s pod for parallel build premerge job
-pytestmark = pytest.mark.premerge_ci_1
 
 basic_struct_gen = StructGen([
     ['child' + str(ind), sub_gen]
@@ -62,7 +60,7 @@ def test_map_entries(data_gen):
                 'map_entries(a)'))
 
 
-def get_map_value_gens():
+def get_map_value_gens(precision=18, scale=0):
     def simple_struct_value_gen():
         return StructGen([["child", IntegerGen()]])
 
@@ -75,8 +73,11 @@ def get_map_value_gens():
     def array_value_gen():
         return ArrayGen(IntegerGen(), max_length=6)
 
+    def decimal_value_gen():
+        return DecimalGen(precision, scale)
+
     return [ByteGen, ShortGen, IntegerGen, LongGen, FloatGen, DoubleGen,
-            StringGen, DateGen, TimestampGen, DecimalGen,
+            StringGen, DateGen, TimestampGen, decimal_value_gen,
             simple_struct_value_gen, nested_struct_value_gen, nested_map_value_gen, array_value_gen]
 
 
@@ -135,6 +136,12 @@ def test_get_map_value_timestamp_keys(data_gen):
             'a[timestamp "2022-01-01"]',
             'a[null]'))
 
+def test_map_side_effects():
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark : spark.range(10).selectExpr(
+                'id',
+                'if(id == 0, null, map(id, id, id DIV 2, id)) as m'),
+            conf={'spark.sql.mapKeyDedupPolicy': 'EXCEPTION'})
 
 @pytest.mark.parametrize('key_gen', [StringGen(nullable=False), IntegerGen(nullable=False), basic_struct_gen], ids=idfn)
 @pytest.mark.parametrize('value_gen', [StringGen(nullable=True), IntegerGen(nullable=True), basic_struct_gen], ids=idfn)
@@ -332,6 +339,60 @@ def test_element_at_map_numeric_keys(data_gen):
             'element_at(a, 999)'),
         conf={'spark.sql.ansi.enabled': False})
 
+@pytest.mark.parametrize('data_gen',
+                         [MapGen(DecimalGen(precision=35, scale=2, nullable=False), value(), max_length=6)
+                          for value in get_map_value_gens(precision=37, scale=0)],
+                         ids=idfn)
+def test_get_map_value_element_at_map_dec_col_keys(data_gen):
+    keys = DecimalGen(precision=35, scale=2)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: two_col_df(spark, data_gen, keys).selectExpr(
+            'element_at(a, b)', 'a[b]'),
+        conf={'spark.sql.ansi.enabled': False})
+
+@pytest.mark.parametrize('data_gen',
+                         [MapGen(StringGen(pattern='key', nullable=False), IntegerGen(nullable=False), max_length=1, min_length=1, nullable=False)],
+                         ids=idfn)
+@pytest.mark.parametrize('ansi', [True, False], ids=idfn)
+def test_get_map_value_element_at_map_string_col_keys_ansi(data_gen, ansi):
+    keys = StringGen(pattern='key', nullable=False)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: two_col_df(spark, data_gen, keys).selectExpr(
+            'element_at(a, b)', 'a[b]'),
+        conf={'spark.sql.ansi.enabled': ansi})
+
+@pytest.mark.parametrize('data_gen',
+                         [MapGen(StringGen(pattern='key_[0-9]', nullable=False), value(), max_length=6)
+                          for value in get_map_value_gens(precision=37, scale=0)],
+                         ids=idfn)
+def test_get_map_value_element_at_map_string_col_keys(data_gen):
+    keys = StringGen(pattern='key_[0-9]')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: two_col_df(spark, data_gen, keys).selectExpr(
+            'element_at(a, b)', 'a[b]'),
+        conf={'spark.sql.ansi.enabled': False})
+
+@pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
+def test_element_at_map_string_col_keys_ansi_fail(data_gen):
+    keys = StringGen(pattern='NOT_FOUND')
+    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    # For 3.3.0+ strictIndexOperator should not affect element_at
+    test_conf=copy_and_update(ansi_enabled_conf, {'spark.sql.ansi.strictIndexOperator': 'false'})
+    assert_gpu_and_cpu_error(
+        lambda spark: two_col_df(spark, data_gen, keys).selectExpr(
+            'element_at(a, b)').collect(),
+        conf=test_conf,
+        error_message=message)
+
+@pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
+def test_get_map_value_string_col_keys_ansi_fail(data_gen):
+    keys = StringGen(pattern='NOT_FOUND')
+    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    assert_gpu_and_cpu_error(
+        lambda spark: two_col_df(spark, data_gen, keys).selectExpr(
+            'a[b]').collect(),
+        conf=ansi_enabled_conf,
+        error_message=message)
 
 @pytest.mark.parametrize('data_gen',
                          [MapGen(DateGen(nullable=False), value(), max_length=6)
@@ -436,13 +497,17 @@ def test_transform_keys_duplicate_fail(data_gen):
             error_message='Duplicate map key')
 
 
-@allow_non_gpu('ProjectExec,Alias,TransformKeys,Literal,LambdaFunction,NamedLambdaVariable')
 @pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
-def test_transform_keys_last_win_fallback(data_gen):
-    assert_gpu_fallback_collect(
+def test_transform_keys_last_win(data_gen):
+    assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, data_gen).selectExpr('transform_keys(a, (key, value) -> 1)'),
-            'TransformKeys',
             conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
+
+@pytest.mark.parametrize('data_gen', [MapGen(IntegerGen(nullable=False), long_gen)], ids=idfn)
+def test_transform_keys_last_win2(data_gen):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr('transform_keys(a, (key, value) -> key % 2)'),
+        conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
 
 # We add in several types of processing for foldable functions because the output
 # can be different types.
@@ -453,3 +518,12 @@ def test_transform_keys_last_win_fallback(data_gen):
 def test_sql_map_scalars(query):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : spark.sql('SELECT {}'.format(query)))
+
+@pytest.mark.parametrize('data_gen', map_gens_sample, ids=idfn)
+def test_map_filter(data_gen):
+    columns = ['map_filter(a, (key, value) -> isnotnull(value) )',
+               'map_filter(a, (key, value) -> isnull(value) )',
+               'map_filter(a, (key, value) -> isnull(key) or isnotnull(value) )',
+               'map_filter(a, (key, value) -> isnotnull(key) and isnull(value) )']
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr(columns))

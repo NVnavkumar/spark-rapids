@@ -20,7 +20,7 @@ import scala.collection.mutable.ArrayBuffer
 import com.nvidia.spark.rapids.OrcOutputStripe
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hive.common.io.DiskRangeList
-import org.apache.orc.{CompressionCodec, CompressionKind, DataReader, OrcFile, OrcProto, PhysicalWriter, Reader, StripeInformation, TypeDescription}
+import org.apache.orc.{CompressionCodec, CompressionKind, DataReader, OrcConf, OrcFile, OrcProto, PhysicalWriter, Reader, StripeInformation, TypeDescription}
 import org.apache.orc.impl.{DataReaderProperties, OutStream, SchemaEvolution}
 import org.apache.orc.impl.RecordReaderImpl.SargApplier
 
@@ -55,15 +55,14 @@ trait OrcShims321CDHBase {
       conf: Configuration,
       orcReader: Reader,
       dataReader: DataReader,
-      gen: (StripeInformation, OrcProto.StripeFooter, Array[Int], Array[Int]) => OrcOutputStripe,
+      gen: (StripeInformation, OrcProto.StripeFooter, Array[Int]) => OrcOutputStripe,
       evolution: SchemaEvolution,
       sargApp: SargApplier,
       sargColumns: Array[Boolean],
       ignoreNonUtf8BloomFilter: Boolean,
       writerVersion: OrcFile.WriterVersion,
       fileIncluded: Array[Boolean],
-      columnMapping: Array[Int],
-      idMapping: Array[Int]): ArrayBuffer[OrcOutputStripe] = {
+      columnMapping: Array[Int]): ArrayBuffer[OrcOutputStripe] = {
     val result = new ArrayBuffer[OrcOutputStripe](stripes.length)
     stripes.foreach { stripe =>
       val stripeFooter = dataReader.readStripeFooter(stripe)
@@ -82,7 +81,7 @@ trait OrcShims321CDHBase {
       }
 
       if (needStripe) {
-        result.append(gen(stripe, stripeFooter, columnMapping, idMapping))
+        result.append(gen(stripe, stripeFooter, columnMapping))
       }
     }
     result
@@ -95,9 +94,9 @@ trait OrcShims321CDHBase {
     lhs.equals(rhs)
   }
 
-  // forcePositionalEvolution is available from Spark-3.2. So setting this as false.
+  // forcePositionalEvolution is available from Spark-3.2.
   def forcePositionalEvolution(conf:Configuration): Boolean = {
-    false
+    OrcConf.FORCE_POSITIONAL_EVOLUTION.getBoolean(conf)
   }
 
   // orcTypeDescriptionString is renamed to getOrcSchemaString from 3.3+

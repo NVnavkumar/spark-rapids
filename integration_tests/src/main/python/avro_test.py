@@ -16,10 +16,9 @@ import os
 from spark_session import with_cpu_session, with_gpu_session
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal
 from data_gen import *
 from marks import *
-from pyspark.sql.types import *
 
 if os.environ.get('INCLUDE_SPARK_AVRO_JAR', 'false') == 'false':
     pytestmark = pytest.mark.skip(reason=str("INCLUDE_SPARK_AVRO_JAR is disabled"))
@@ -30,7 +29,7 @@ _enable_all_types_conf = {
     'spark.rapids.sql.format.avro.enabled': 'true',
     'spark.rapids.sql.format.avro.read.enabled': 'true'}
 
-rapids_reader_types = ['PERFILE', 'COALESCING']
+rapids_reader_types = ['PERFILE', 'COALESCING', 'MULTITHREADED']
 
 # 50 files for the coalescing reading case
 coalescingPartitionNum = 50
@@ -117,3 +116,37 @@ def test_coalescing_uniform_sync(spark_tmp_path, v1_enabled_list):
     # read the coalesced files by CPU
     with_cpu_session(
         lambda spark: spark.read.format("avro").load(dump_path).collect())
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ["", "avro"], ids=["v1", "v2"])
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_avro_read_with_corrupt_files(spark_tmp_path, reader_type, v1_enabled_list):
+    first_dpath = spark_tmp_path + '/AVRO_DATA/first'
+    with_cpu_session(lambda spark : spark.range(1).toDF("a").write.format("avro").save(first_dpath))
+    second_dpath = spark_tmp_path + '/AVRO_DATA/second'
+    with_cpu_session(lambda spark : spark.range(1, 2).toDF("a").write.format("avro").save(second_dpath))
+    third_dpath = spark_tmp_path + '/AVRO_DATA/third'
+    with_cpu_session(lambda spark : spark.range(2, 3).toDF("a").write.json(third_dpath))
+
+    all_confs = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.files.ignoreCorruptFiles': "true",
+        'spark.sql.sources.useV1SourceList': v1_enabled_list})
+
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark : spark.read.format("avro").load([first_dpath, second_dpath, third_dpath]),
+            conf=all_confs)
+
+
+@pytest.mark.parametrize('v1_enabled_list', ["avro", ""], ids=["v1", "v2"])
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_read_count(spark_tmp_path, v1_enabled_list, reader_type):
+    data_path = spark_tmp_path + '/AVRO_DATA'
+    gen_avro_files([('_c0', int_gen)], data_path)
+
+    all_confs = copy_and_update(_enable_all_types_conf, {
+        'spark.rapids.sql.format.avro.reader.type': reader_type,
+        'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_row_counts_equal(
+        lambda spark: spark.read.format("avro").load(data_path),
+        conf=all_confs)

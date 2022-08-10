@@ -65,7 +65,7 @@ class PluginTypeChecker extends Logging {
 
   def setOperatorScore(filePath: String): Unit = {
     val source = Source.fromFile(filePath)
-    supportedOperatorsScore = readSupportedOperators(source).map(x => (x._1, x._2.toInt))
+    supportedOperatorsScore = readSupportedOperators(source).map(x => (x._1, x._2.toDouble))
   }
 
   def setSupportedExecs(filePath: String): Unit = {
@@ -82,9 +82,9 @@ class PluginTypeChecker extends Logging {
 
   def getSupportedExprs: Map[String, String] = supportedExprs
 
-  private def readOperatorsScore: Map[String, Int] = {
+  private def readOperatorsScore: Map[String, Double] = {
     val source = Source.fromResource(OPERATORS_SCORE_FILE)
-    readSupportedOperators(source).map(x => (x._1, x._2.toInt))
+    readSupportedOperators(source).map(x => (x._1, x._2.toDouble))
   }
 
   private def readSupportedExecs: Map[String, String] = {
@@ -94,7 +94,7 @@ class PluginTypeChecker extends Logging {
 
   private def readSupportedExprs: Map[String, String] = {
     val source = Source.fromResource(SUPPORTED_EXPRS_FILE)
-    readSupportedOperators(source)
+    readSupportedOperators(source).map(x => (x._1.toLowerCase, x._2))
   }
 
   private def readSupportedTypesForPlugin: (
@@ -200,12 +200,7 @@ class PluginTypeChecker extends Logging {
         // check if any of the not supported types are in the schema
         val nsFiltered = dtSupMap(NS).filter(t => schemaLower.contains(t.toLowerCase()))
         if (nsFiltered.nonEmpty) {
-          val deDuped = if (nsFiltered.contains("dec") && nsFiltered.contains("decimal")) {
-            nsFiltered.filterNot(_.equals("dec"))
-          } else {
-            nsFiltered
-          }
-          (0.0, deDuped.toSet)
+          (0.0, nsFiltered.toSet)
         } else {
           // Started out giving different weights based on partial support and so forth
           // but decided to be optimistic and not penalize if we don't know, perhaps
@@ -231,7 +226,7 @@ class PluginTypeChecker extends Logging {
       writeFormats.map(x => x.trim).contains(_))
   }
 
-  def getSpeedupFactor(execOrExpr: String): Int = {
+  def getSpeedupFactor(execOrExpr: String): Double = {
     supportedOperatorsScore.get(execOrExpr).getOrElse(-1)
   }
 
@@ -252,6 +247,24 @@ class PluginTypeChecker extends Logging {
       }
     } else {
       logDebug(s"Exec $exec does not exist in supported execs file")
+      false
+    }
+  }
+
+  def isExprSupported(expr: String): Boolean = {
+    // Remove _ from the string. Example: collect_list => collectlist.
+    // collect_list is alias for CollectList aggregate function
+    val exprLowercase = expr.toLowerCase.replace("_","")
+    if (supportedExprs.contains(exprLowercase)) {
+      val exprSupported = supportedExprs.getOrElse(exprLowercase, "NS")
+      if (exprSupported == "S") {
+        true
+      } else {
+        logDebug(s"Expression explicitly not supported, value: $exprSupported")
+        false
+      }
+    } else {
+      logDebug(s"Expr $expr does not exist in supported execs file")
       false
     }
   }

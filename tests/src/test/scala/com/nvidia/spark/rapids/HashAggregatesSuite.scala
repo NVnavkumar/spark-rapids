@@ -295,7 +295,7 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
       _.getMessage.startsWith("cannot resolve"),
       longsFromCSVDf,
       conf = floatAggConf) {
-    frame => frame.agg(avg(lit(true)),avg(lit(false)))
+    frame => frame.agg(avg(lit(true)).alias("t"), avg(lit(false)).alias("f"))
   }
 
   testSparkResultsAreEqual(
@@ -1617,21 +1617,6 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
     conf = floatAggConf, repart = 2) {
     frame => frame.groupBy("large_longs").agg(avg("large_longs"))
   } { (_, gpuPlan) => checkExecPlan(gpuPlan) }
-
-  ALLOW_NON_GPU_testSparkResultsAreEqualWithCapture(
-    "max_with_nans_fall_back",
-    nanDf,
-    Seq("HashAggregateExec", "AggregateExpression",
-      "AttributeReference", "Alias", "Max", "ShuffleExchangeExec"),
-    conf = enableCsvConf()) {
-    frame => frame.agg(max("doubles"))
-  } { (_, gpuPlan) => {
-    // verify nothing ran on the gpu
-    if (gpuPlan.conf.getAllConfs(RapidsConf.SQL_ENABLED.key).toBoolean) {
-      val execNode = gpuPlan.find(_.isInstanceOf[GpuHashAggregateExec])
-      assert(execNode.isEmpty)
-    }
-  }}
 
   ALLOW_NON_GPU_testSparkResultsAreEqualWithCapture(
     "min_with_nans_fall_back",

@@ -52,7 +52,8 @@ class GpuReadParquetFileFormat extends ParquetFileFormat with GpuReadFileFormatW
       partitionSchema,
       filters.toArray,
       new RapidsConf(sqlConf),
-      metrics)
+      metrics,
+      options)
     PartitionReaderIterator.buildReader(factory)
   }
 }
@@ -60,10 +61,7 @@ class GpuReadParquetFileFormat extends ParquetFileFormat with GpuReadFileFormatW
 object GpuReadParquetFileFormat {
   def tagSupport(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
     val fsse = meta.wrapped
-    GpuParquetScan.tagSupport(
-      SparkShimImpl.sessionFromPlan(fsse),
-      fsse.requiredSchema,
-      meta
-    )
+    val session = SparkShimImpl.sessionFromPlan(fsse)
+    GpuParquetScan.tagSupport(session, fsse.requiredSchema, meta)
   }
 }

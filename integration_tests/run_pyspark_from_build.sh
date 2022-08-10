@@ -48,10 +48,28 @@ else
     if [ -d "$LOCAL_JAR_PATH" ]; then
         AVRO_JARS=$(echo "$LOCAL_JAR_PATH"/spark-avro*.jar)
         PLUGIN_JARS=$(echo "$LOCAL_JAR_PATH"/rapids-4-spark_*.jar)
+        if [ -f $(echo $LOCAL_JAR_PATH/parquet-hadoop*.jar) ]; then
+            export INCLUDE_PARQUET_HADOOP_TEST_JAR=true
+            PARQUET_HADOOP_TESTS=$(echo $LOCAL_JAR_PATH/parquet-hadoop*.jar)
+            # remove the log4j.properties file so it doesn't conflict with ours, ignore errors
+            # if it isn't present or already removed
+            zip -d $PARQUET_HADOOP_TESTS log4j.properties || true
+        else
+            export INCLUDE_PARQUET_HADOOP_TEST_JAR=false
+            PARQUET_HADOOP_TESTS=
+        fi
         # the integration-test-spark3xx.jar, should not include the integration-test-spark3xxtest.jar
         TEST_JARS=$(echo "$LOCAL_JAR_PATH"/rapids-4-spark-integration-tests*-$INTEGRATION_TEST_VERSION.jar)
     else
         AVRO_JARS=$(echo "$SCRIPTPATH"/target/dependency/spark-avro*.jar)
+        PARQUET_HADOOP_TESTS=$(echo "$SCRIPTPATH"/target/dependency/parquet-hadoop*.jar)
+        # remove the log4j.properties file so it doesn't conflict with ours, ignore errors
+        # if it isn't present or already removed
+        zip -d $PARQUET_HADOOP_TESTS log4j.properties || true
+        MIN_PARQUET_JAR="$SCRIPTPATH/target/dependency/parquet-hadoop-1.12.0-tests.jar"
+        # Make sure we have Parquet version >= 1.12 in the dependency
+        LOWEST_PARQUET_JAR=$(echo -e "$MIN_PARQUET_JAR\n$PARQUET_HADOOP_TESTS" | sort -V | head -1)
+        export INCLUDE_PARQUET_HADOOP_TEST_JAR=$([[ "$LOWEST_PARQUET_JAR" == "$MIN_PARQUET_JAR" ]] && echo true || echo false)
         PLUGIN_JARS=$(echo "$SCRIPTPATH"/../dist/target/rapids-4-spark_*.jar)
         # the integration-test-spark3xx.jar, should not include the integration-test-spark3xxtest.jar
         TEST_JARS=$(echo "$SCRIPTPATH"/target/rapids-4-spark-integration-tests*-$INTEGRATION_TEST_VERSION.jar)
@@ -70,7 +88,7 @@ else
     fi
 
     # Only 3 jars: dist.jar integration-test.jar avro.jar
-    ALL_JARS="$PLUGIN_JARS $TEST_JARS $AVRO_JARS"
+    ALL_JARS="$PLUGIN_JARS $TEST_JARS $AVRO_JARS $PARQUET_HADOOP_TESTS"
     echo "AND PLUGIN JARS: $ALL_JARS"
     if [[ "${TEST}" != "" ]];
     then
@@ -97,11 +115,11 @@ else
         # free memory. We use free memory to try and avoid issues if the GPU also is working
         # on graphics, which happens with many workstation GPUs. We also reserve 2 GiB for
         # CUDA/CUDF overhead which can be used because of JIT or launching large kernels.
-       
+
         # If you need to increase the amount of GPU memory you need to change it here and
         # below where the processes are launched.
         GPU_MEM_PARALLEL=`nvidia-smi --query-gpu=memory.free --format=csv,noheader | awk '{if (MAX < $1){ MAX = $1}} END {print int((MAX - 2 * 1024) / ((1.5 * 1024) + 750))}'`
-        CPU_CORES=`nproc` 
+        CPU_CORES=`nproc`
         HOST_MEM_PARALLEL=`cat /proc/meminfo | grep MemAvailable | awk '{print int($2 / (5 * 1024))}'`
         TMP_PARALLEL=$(( $GPU_MEM_PARALLEL > $CPU_CORES ? $CPU_CORES : $GPU_MEM_PARALLEL ))
         TMP_PARALLEL=$(( $TMP_PARALLEL > $HOST_MEM_PARALLEL ? $HOST_MEM_PARALLEL : $TMP_PARALLEL ))
@@ -175,7 +193,7 @@ else
     MB_PER_EXEC=${MB_PER_EXEC:-1024}
     CORES_PER_EXEC=${CORES_PER_EXEC:-1}
 
-    SPARK_TASK_MAXFAILURES=1
+    SPARK_TASK_MAXFAILURES=${SPARK_TASK_MAXFAILURES:-1}
     [[ "$VERSION_STRING" < "3.1.1" ]] && SPARK_TASK_MAXFAILURES=4
 
     export PYSP_TEST_spark_driver_extraClassPath="${ALL_JARS// /:}"
@@ -218,7 +236,7 @@ else
     else
       # If a master is not specified, use "local[cores, $SPARK_TASK_MAXFAILURES]"
       if [ -z "${PYSP_TEST_spark_master}" ] && [[ "$SPARK_SUBMIT_FLAGS" != *"--master"* ]]; then
-        CPU_CORES=`nproc` 
+        CPU_CORES=`nproc`
         # We are limiting the number of tasks in local mode to 4 because it helps to reduce the
         # total memory usage, especially host memory usage because when copying data to the GPU
         # buffers as large as batchSizeBytes can be allocated, and the fewer of them we have the better.
@@ -227,7 +245,7 @@ else
       fi
     fi
 
-    # If you want to change the amount of GPU memory allocated you have to change it here 
+    # If you want to change the amount of GPU memory allocated you have to change it here
     # and where TEST_PARALLEL is calculated
     export PYSP_TEST_spark_rapids_memory_gpu_allocSize='1536m'
 

@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util
 
-import ai.rapids.cudf.{HostConcatResultUtil, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
 import ai.rapids.cudf.JCudfSerialization.{HostConcatResult, SerializedTableHeader}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 
@@ -103,7 +103,7 @@ class HostShuffleCoalesceIterator(
       val firstHeader = serializedTables.peekFirst().header
       if (firstHeader.getNumColumns == 0) {
         (0 until numTablesInBatch).foreach(_ => serializedTables.removeFirst())
-        HostConcatResultUtil.rowsOnlyHostConcatResult(numRowsInBatch)
+        cudf_utils.HostConcatResultUtil.rowsOnlyHostConcatResult(numRowsInBatch)
       } else {
         val headers = new Array[SerializedTableHeader](numTablesInBatch)
         withResource(new Array[HostMemoryBuffer](numTablesInBatch)) { buffers =>
@@ -204,14 +204,22 @@ class GpuShuffleCoalesceIterator(iter: Iterator[HostConcatResult],
       throw new NoSuchElementException("No more columnar batches")
     }
     withResource(new NvtxRange("Concat+Load Batch", NvtxColor.YELLOW)) { _ =>
-      withResource(iter.next()) { hostConcatResult =>
+      val hostConcatResult = withResource(new MetricRange(opTimeMetric)) { _ =>
+        // op time covers concat time performed in `iter.next()`.
+        // Note the concat runs on CPU.
+        // GPU time = opTime - concatTime
+        iter.next()
+      }
+
+      withResource(hostConcatResult) { _ =>
         // We acquire the GPU regardless of whether `hostConcatResult`
         // is an empty batch or not, because the downstream tasks expect
         // the `GpuShuffleCoalesceIterator` to acquire the semaphore and may
         // generate GPU data from batches that are empty.
         GpuSemaphore.acquireIfNecessary(TaskContext.get(), semWaitTime)
+
         withResource(new MetricRange(opTimeMetric)) { _ =>
-          val batch = HostConcatResultUtil.getColumnarBatch(hostConcatResult, dataTypes)
+          val batch = cudf_utils.HostConcatResultUtil.getColumnarBatch(hostConcatResult, dataTypes)
           outputBatchesMetric += 1
           outputRowsMetric += batch.numRows()
           batch

@@ -18,9 +18,12 @@ package com.nvidia.spark.rapids
 
 import java.net.URL
 
+import com.nvidia.spark.GpuCachedBatchSerializer
+import com.nvidia.spark.rapids.iceberg.IcebergProvider
 import org.apache.commons.lang3.reflect.MethodUtils
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
+import scala.util.{Failure, Success, Try}
 
 import org.apache.spark.{SPARK_BRANCH, SPARK_BUILD_DATE, SPARK_BUILD_USER, SPARK_REPO_URL, SPARK_REVISION, SPARK_VERSION, SparkConf, SparkEnv}
 import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin}
@@ -52,13 +55,13 @@ import org.apache.spark.util.MutableURLClassLoader
 
     E.g., Spark 3.2.0 Shim will use
 
-    jar:file:/home/spark/rapids-4-spark_2.12-22.06.0.jar!/spark3xx-common/
-    jar:file:/home/spark/rapids-4-spark_2.12-22.06.0.jar!/spark320/
+    jar:file:/home/spark/rapids-4-spark_2.12-22.10.0.jar!/spark3xx-common/
+    jar:file:/home/spark/rapids-4-spark_2.12-22.10.0.jar!/spark320/
 
     Spark 3.1.1 will use
 
-    jar:file:/home/spark/rapids-4-spark_2.12-22.06.0.jar!/spark3xx-common/
-    jar:file:/home/spark/rapids-4-spark_2.12-22.06.0.jar!/spark311/
+    jar:file:/home/spark/rapids-4-spark_2.12-22.10.0.jar!/spark3xx-common/
+    jar:file:/home/spark/rapids-4-spark_2.12-22.10.0.jar!/spark311/
 
     Using these Jar URL's allows referencing different bytecode produced from identical sources
     by incompatible Scala / Spark dependencies.
@@ -79,6 +82,7 @@ object ShimLoader extends Logging {
   @volatile private var sparkShims: SparkShims = _
   @volatile private var shimURL: URL = _
   @volatile private var pluginClassLoader: ClassLoader = _
+  @volatile private var conventionalSingleShimJarDetected: Boolean = _
 
   // REPL-only logic
   @volatile private var tmpClassLoader: MutableURLClassLoader = _
@@ -138,6 +142,7 @@ object ShimLoader extends Logging {
       .flatMap {
         case env if !env.conf.get("spark.rapids.force.caller.classloader",
           true.toString).toBoolean => Option(env.serializer)
+        case _ if (conventionalSingleShimJarDetected) => None
         case _ =>
           logInfo("Forcing shim caller classloader update (default behavior). " +
             "If it causes issues with userClassPathFirst, set " +
@@ -162,7 +167,9 @@ object ShimLoader extends Logging {
         findURLClassLoader(serdeClassLoader)
       }.orElse {
         val shimLoaderCallerCl = getClass.getClassLoader
-        logInfo("Falling back on ShimLoader caller's classloader " + shimLoaderCallerCl)
+        if (!conventionalSingleShimJarDetected) {
+          logInfo("Falling back on ShimLoader caller's classloader " + shimLoaderCallerCl)
+        }
         Option(shimLoaderCallerCl)
       }
   }
@@ -210,21 +217,32 @@ object ShimLoader extends Logging {
     // TODO propose a proper addClassPathURL API to Spark similar to addJar but
     //  accepting non-file-based URI
     serializerClassloader().foreach { urlAddable =>
-      logInfo(s"Updating spark classloader $urlAddable with the URLs: " +
-        urlsForSparkClassLoader.mkString(", "))
       urlsForSparkClassLoader.foreach { url =>
-        MethodUtils.invokeMethod(urlAddable, true, "addURL", url)
-      }
-      logInfo(s"Spark classLoader $urlAddable updated successfully")
-      urlAddable match {
-        case urlCl: java.net.URLClassLoader =>
-          if (!urlCl.getURLs.contains(shimCommonURL)) {
-            // infeasible, defensive diagnostics
-            logWarning(s"Didn't find expected URL $shimCommonURL in the spark " +
-              s"classloader $urlCl although addURL succeeded, maybe pushed up to the " +
-              s"parent classloader ${urlCl.getParent}")
+        if (!conventionalSingleShimJarDetected) {
+          logInfo(s"Updating spark classloader $urlAddable with the URLs: " +
+            urlsForSparkClassLoader.mkString(", "))
+          Try(MethodUtils.invokeMethod(urlAddable, true, "addURL", url))
+            .recoverWith {
+              case nsm: NoSuchMethodException =>
+                logWarning("JDK8+ detected, consider setting " +
+                  "spark.rapids.force.caller.classloader to false as a workaround")
+                logDebug(s"JDK8+ detected by catching ${nsm}", nsm)
+                Success(Unit)
+              case t => Failure(t)
+            }.get
+
+          logInfo(s"Spark classLoader $urlAddable updated successfully")
+          urlAddable match {
+            case urlCl: java.net.URLClassLoader =>
+              if (!urlCl.getURLs.contains(shimCommonURL)) {
+                // infeasible, defensive diagnostics
+                logWarning(s"Didn't find expected URL $shimCommonURL in the spark " +
+                  s"classloader $urlCl although addURL succeeded, maybe pushed up to the " +
+                  s"parent classloader ${urlCl.getParent}")
+              }
+            case _ => ()
           }
-        case _ => ()
+        }
       }
       pluginClassLoader = urlAddable
     }
@@ -285,18 +303,27 @@ object ShimLoader extends Logging {
         thisClassLoader.getResources(serviceProviderListPath)
           .asScala.map(scala.io.Source.fromURL)
           .flatMap(_.getLines())
+          .toSeq
       }
 
     assert(serviceProviderList.nonEmpty, "Classpath should contain the resource for " +
         serviceProviderListPath)
 
+    val numShimServiceProviders = serviceProviderList.size
     val shimServiceProviderOpt = serviceProviderList.flatMap { shimServiceProviderStr =>
       val mask = shimIdFromPackageName(shimServiceProviderStr)
       try {
         val shimURL = new java.net.URL(s"${shimRootURL.toString}$mask/")
         val shimClassLoader = new MutableURLClassLoader(Array(shimURL, shimCommonURL),
           thisClassLoader)
-        val shimClass = shimClassLoader.loadClass(shimServiceProviderStr)
+        val shimClass = Try[java.lang.Class[_]] {
+          val ret = thisClassLoader.loadClass(shimServiceProviderStr)
+          if (numShimServiceProviders == 1) {
+            conventionalSingleShimJarDetected = true
+            logInfo("Conventional shim jar layout for a single Spark verision detected")
+          }
+          ret
+        }.getOrElse(shimClassLoader.loadClass(shimServiceProviderStr))
         Option(
           (instantiateClass(shimClass).asInstanceOf[SparkShimServiceProvider], shimURL)
         )
@@ -360,9 +387,13 @@ object ShimLoader extends Logging {
     loader.loadClass(className)
   }
 
-  def newInstanceOf[T](className: String): T = {
+  private def newInstanceOf[T](className: String): T = {
     instantiateClass(loadClass(className)).asInstanceOf[T]
   }
+
+  def newOptimizerClass(className: String): Optimizer = {
+    newInstanceOf[Optimizer](className)
+  } 
 
   // avoid cached constructors
   private def instantiateClass[T](cls: Class[T]): T = {
@@ -413,6 +444,10 @@ object ShimLoader extends Logging {
     newInstanceOf("com.nvidia.spark.rapids.InternalExclusiveModeGpuDiscoveryPlugin")
   }
 
+  def newParquetCachedBatchSerializer(): GpuCachedBatchSerializer = {
+    newInstanceOf("com.nvidia.spark.rapids.ParquetCachedBatchSerializer")
+  }
+
   def loadColumnarRDD(): Class[_] = {
     loadClass("org.apache.spark.sql.rapids.execution.InternalColumnarRddConverter")
   }
@@ -420,4 +455,14 @@ object ShimLoader extends Logging {
   def newExplainPlan(): ExplainPlanBase = {
     newInstanceOf[ExplainPlanBase]("com.nvidia.spark.rapids.ExplainPlanImpl")
   }
+
+  def newHiveProvider(): HiveProvider= {
+    newInstanceOf[HiveProvider]("org.apache.spark.sql.hive.rapids.HiveProviderImpl")
+  }
+
+  def newAvroProvider(): AvroProvider = ShimLoader.newInstanceOf[AvroProvider](
+    "org.apache.spark.sql.rapids.AvroProviderImpl")
+
+  def newIcebergProvider(): IcebergProvider = ShimLoader.newInstanceOf[IcebergProvider](
+    "com.nvidia.spark.rapids.iceberg.IcebergProviderImpl")
 }

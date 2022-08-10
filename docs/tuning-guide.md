@@ -194,6 +194,14 @@ rather than megabytes or smaller.
 Note that the GPU can encode Parquet and ORC data much faster than the CPU, so the costs of
 writing large files can be significantly lower.
 
+## Input Files' column order
+When there are a large number of columns for file formats like Parquet and ORC the size of the 
+contiguous data for each individual column can be very small. This can result in doing lots of very 
+small random reads to the file system to read the data for the subset of columns that are needed.
+
+We suggest reordering the columns needed by the queries and then rewrite the files to make those
+columns adjacent. This could help both Spark on CPU and GPU.
+
 ## Input Partition Size
 
 Similar to the discussion on [input file size](#input-files), many queries can benefit from using
@@ -278,29 +286,9 @@ from the main [columnar batch size](#columnar-batch-size) setting.  Some transco
 load CSV files then write Parquet files) need to lower this setting when using large task input
 partition sizes to avoid GPU out of memory errors.
 
-## Enable Incompatible Operations
-Configuration key: 
-[`spark.rapids.sql.incompatibleOps.enabled`](configs.md#sql.incompatibleOps.enabled)
-
-Default value: `false`
-
-There are several operators/expressions that are not 100% compatible with the CPU version. These
-incompatibilities are documented [here](compatibility.md) and in the 
-[configuration documentation](./configs.md). Many of these incompatibilities are around corner
-cases that most queries do not encounter, or that would not result in any meaningful difference
-to the resulting output.  By enabling these operations either individually or with the 
-`spark.rapids.sql.incompatibleOps.enabled` config it can greatly improve performance of your
-queries. Over time, we expect the number of incompatible operators to reduce.
-
-If you want to understand if an operation is or is not on the GPU and why see second on
-[explain in the FAQ](FAQ.md#explain)
-
-The following configs all enable different types of incompatible operations that can improve
-performance.
-- [`spark.rapids.sql.variableFloatAgg.enabled`](configs.md#sql.variableFloatAgg.enabled) 
-- [`spark.rapids.sql.hasNans`](configs.md#sql.hasNans)
-- [`spark.rapids.sql.castFloatToString.enabled`](configs.md#sql.castFloatToString.enabled)
-- [`spark.rapids.sql.castStringToFloat.enabled`](configs.md#sql.castStringToFloat.enabled)
+## Set hasNans flag to False
+If your data has float values but doesn't contain NaNs set [`spark.rapids.sql.hasNans`](configs.md#sql.hasNans) to 
+`false` to get the benefit of running on the GPU
 
 ## Metrics
 
@@ -315,7 +303,7 @@ Custom Spark SQL Metrics are available which can help identify performance bottl
 | buildTime         | build time                   | Time to load the build-side of a join.                                                                                                                                             |
 | collectTime       | collect time                 | For a broadcast the amount of time it took to collect the broadcast data back to the driver before broadcasting it back out.                                                       |
 | computeAggTime    | aggregation time             | Time computing an aggregation.                                                                                                                                                     |
-| concatTime        | concat batch time            | Time to concatenate batches.                                                                                                                                                       |
+| concatTime        | concat batch time            | Time to concatenate batches. Runs on CPU.                                                                                                                                                      |
 | copyBufferTime    | copy buffer time             | Time spent on copying upstreaming data into Rapids buffers.                                                                                                                        |
 | filterTime        | filter time                  | Time spent applying filters within other operators, such as joins.                                                                                                                 |
 | gpuDecodeTime     | GPU decode time              | Time spent on GPU decoding encrypted or compressed data.                                                                                                                           |
@@ -326,7 +314,7 @@ Custom Spark SQL Metrics are available which can help identify performance bottl
 | numOutputBatches  | output columnar batches      | Number of columnar batches that the operator outputs.                                                                                                                              |
 | numOutputRows     | output rows                  | Number of rows that the operator outputs.                                                                                                                                          |
 | numPartitions     | partitions                   | Number of output partitions from a file scan or shuffle exchange.                                                                                                                  |
-| opTime            | op time                      | Time that an operator takes, exclusive of the time for executing or fetching results from child operators, and typically outside of the time it takes to acquire the GPU semaphore. |
+| opTime            | op time                      | Time that an operator takes, exclusive of the time for executing or fetching results from child operators, and typically outside of the time it takes to acquire the GPU semaphore. <br/> Note: Sometimes contains CPU times, e.g.: concatTime |
 | partitionSize     | partition data size          | Total size in bytes of output partitions.                                                                                                                                          |
 | peakDevMemory     | peak device memory           | Peak GPU memory used during execution of an operator.                                                                                                                              |
 | semaphoreWaitTime | GPU semaphore wait time      | Time spent waiting for the GPU semaphore.                                                                                                                                          |
@@ -353,6 +341,9 @@ How long does operator X take on the GPU vs the CPU?
 
 ### Time taken on the GPU
 
+`opTime` mainly convey the GPU time.
+If GPU operators have some workload on CPU, the GPU time is: `opTime` - CPU time, e.g.:
+`opTime` - `concatTime`.
 Nearly all GPU operators will have an `op time` metric. This metric times how long a given
 operation took to complete on the GPU separate from anything upstream or down stream of the
 operator. By looking at the `op time` for each operator you should be able to get a feeling of
