@@ -215,7 +215,11 @@ trait GpuExec extends SparkPlan with Arm {
     SparkShimImpl.sessionFromPlan(this)
   }
 
-  override def computeStats(): Statistics =  Statistics(sizeInBytes = 0)
+  override def computeStats(): Statistics = {
+    val e = new java.lang.Exception()
+    e.printStackTrace()
+    Statistics(sizeInBytes = 0)
+  }
 
   /**
    * Return the expressions for this plan node that should be GPU expressions.

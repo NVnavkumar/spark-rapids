@@ -39,7 +39,7 @@ import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.rapids.shims.GpuFileScanRDD
 import org.apache.spark.sql.types._
 
-object SparkShimImpl extends Spark321PlusShims with Spark320until340Shims {
+object SparkShimImpl extends Spark321PlusShims with Spark320until340Shims with Logging {
 
   override def getSparkShimVersion: ShimVersion = ShimLoader.getShimVersion
 
