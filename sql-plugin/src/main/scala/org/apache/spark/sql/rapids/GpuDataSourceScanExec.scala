@@ -22,6 +22,7 @@ import org.apache.hadoop.fs.Path
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
+import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.execution.{ExplainUtils, LeafExecNode}
 import org.apache.spark.sql.sources.BaseRelation
@@ -81,6 +82,10 @@ trait GpuDataSourceScanExec extends LeafExecNode with GpuExec {
    * `InputRDDCodegen` which all implementations used to extend.
    */
   def inputRDDs(): Seq[RDD[InternalRow]]
+
+  override def computeStats(): Statistics = {
+    Statistics(sizeInBytes = relation.sizeInBytes)
+  }
 }
 
 object GpuDataSourceScanExec {

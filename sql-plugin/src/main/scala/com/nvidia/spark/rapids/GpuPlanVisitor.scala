@@ -20,10 +20,11 @@ import org.apache.spark.sql.catalyst.plans.{LeftAnti, LeftSemi}
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.logical.statsEstimation.EstimationUtils
 import org.apache.spark.sql.execution.{LeafExecNode, UnaryExecNode}
+import org.apache.spark.sql.rapids.execution.GpuHashJoin
 
 trait GpuPlanVisitor[T] {
   def visit(p: GpuExec): T = p match {
-    case p: GpuShuffledHashJoinExec => visitJoin(p)
+    case p: GpuHashJoin => visitJoin(p)
     case p: GpuHashAggregateExec => visitAggregate(p)
     case p: UnaryExecNode => visitUnaryNode(p)
     case p: GpuExec => default(p)
@@ -35,7 +36,7 @@ trait GpuPlanVisitor[T] {
 
   def visitUnaryNode(p: UnaryExecNode): T
 
-  def visitJoin(p: GpuShuffledHashJoinExec): T
+  def visitJoin(p: GpuHashJoin): T
 }
 
 object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
@@ -59,7 +60,7 @@ object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
   }
 
   def default(p: GpuExec): Statistics = p match {
-    case p: LeafExecNode => Statistics(sizeInBytes = 1)
+    case p: LeafExecNode => p.computeStats()
     case _: GpuExec => 
       Statistics(sizeInBytes = p.children.map(_.stats.sizeInBytes).filter(_ > 0L).product)
   }
@@ -74,7 +75,7 @@ object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
     }
   }
 
-  def visitJoin(p: GpuShuffledHashJoinExec): Statistics = {
+  def visitJoin(p: GpuHashJoin): Statistics = {
     p.joinType match {
       case LeftAnti | LeftSemi =>
         // LeftSemi and LeftAnti won't ever be bigger than left

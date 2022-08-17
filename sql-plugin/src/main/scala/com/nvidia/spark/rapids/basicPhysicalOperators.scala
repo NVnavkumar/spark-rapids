@@ -30,6 +30,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, Descending, Expression, NamedExpression, NullIntolerant, SortOrder}
+import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning, SinglePartition, UnknownPartitioning}
 import org.apache.spark.sql.execution.{LeafExecNode, ProjectExec, SampleExec, SparkPlan}
 import org.apache.spark.sql.rapids.{GpuPartitionwiseSampledRDD, GpuPoissonSampler, GpuPredicateHelper}
@@ -681,6 +682,17 @@ case class GpuRangeExec(
 
   override protected def doExecute(): RDD[InternalRow] =
     throw new IllegalStateException(s"Row-based execution should not occur for $this")
+
+  override def computeStats(): Statistics = {
+    if (numElements == 0) {
+      Statistics(sizeInBytes = 0, rowCount = Some(0))
+    } else {
+      Statistics(
+        sizeInBytes = LongType.defaultSize * numElements,
+        rowCount = Some(numElements)
+      )
+    }
+  }
 }
 
 

@@ -22,6 +22,7 @@ import com.nvidia.spark.rapids.{DataFromReplacementRule, ExecChecks, GpuExec, Gp
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap, Expression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan}
@@ -153,5 +154,9 @@ case class GpuInMemoryTableScanExec(
 
   protected override def doExecuteColumnar(): RDD[ColumnarBatch] = {
     columnarInputRDD
+  }
+
+  override def computeStats(): Statistics = {
+    relation.computeStats()
   }
 }
