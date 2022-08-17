@@ -25,6 +25,7 @@ import org.apache.spark.sql.rapids.execution.GpuHashJoin
 trait GpuPlanVisitor[T] {
   def visit(p: GpuExec): T = p match {
     case p: GpuHashJoin => visitJoin(p)
+    case p: GpuExpandExec => visitExpand(p)
     case p: GpuHashAggregateExec => visitAggregate(p)
     case p: UnaryExecNode => visitUnaryNode(p)
     case p: GpuExec => default(p)
@@ -37,11 +38,13 @@ trait GpuPlanVisitor[T] {
   def visitUnaryNode(p: UnaryExecNode): T
 
   def visitJoin(p: GpuHashJoin): T
+
+  def visitExpand(p: GpuExpandExec): T
 }
 
 object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
 
-  def visitUnaryNode(p: UnaryExecNode): Statistics = {
+  override def visitUnaryNode(p: UnaryExecNode): Statistics = {
     // There should be some overhead in Row object, the size should not be zero when there is
     // no columns, this help to prevent divide-by-zero error.
     // TODO: Use a GPU version of these 2 estimations
@@ -59,13 +62,13 @@ object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
     Statistics(sizeInBytes = sizeInBytes) 
   }
 
-  def default(p: GpuExec): Statistics = p match {
+  override def default(p: GpuExec): Statistics = p match {
     case p: LeafExecNode => p.computeStats()
     case _: GpuExec => 
       Statistics(sizeInBytes = p.children.map(_.stats.sizeInBytes).filter(_ > 0L).product)
   }
 
-  def visitAggregate(p: GpuHashAggregateExec): Statistics = {
+  override def visitAggregate(p: GpuHashAggregateExec): Statistics = {
     if (p.groupingExpressions.isEmpty) {
       Statistics(
         sizeInBytes = EstimationUtils.getOutputSize(p.output, outputRowCount = 1),
@@ -75,7 +78,7 @@ object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
     }
   }
 
-  def visitJoin(p: GpuHashJoin): Statistics = {
+  override def visitJoin(p: GpuHashJoin): Statistics = {
     p.joinType match {
       case LeftAnti | LeftSemi =>
         // LeftSemi and LeftAnti won't ever be bigger than left
@@ -83,5 +86,10 @@ object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
       case _ =>
         default(p)
     } 
+  }
+
+  override def visitExpand(p: GpuExpandExec): Statistics = {
+    val sizeInBytes = visitUnaryNode(p).sizeInBytes * p.projections.length
+    Statistics(sizeInBytes = sizeInBytes)
   }
 }
