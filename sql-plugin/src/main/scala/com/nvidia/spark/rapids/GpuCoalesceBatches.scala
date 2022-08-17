@@ -27,6 +27,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.types.{DataType, NullType, StructType}
@@ -732,6 +733,17 @@ case class GpuCoalesceBatches(child: SparkPlan, goal: CoalesceGoal)
             f(iter)
           }
       }
+    }
+  }
+
+  override def computeStats(): Statistics = {
+    val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS).value
+    val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES).value
+    goal match {
+      case sizeGoal: CoalesceSizeGoal => Statistics(sizeInBytes = sizeGoal.targetSizeBytes)
+      case batchingGoal: BatchedByKey =>
+          val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)
+          Statistics(sizeInBytes = numOutputBatches * targetSize, rowCount = Option(numOutputRows))
     }
   }
 }

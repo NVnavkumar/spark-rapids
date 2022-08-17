@@ -216,9 +216,10 @@ trait GpuExec extends SparkPlan with Arm {
   }
 
   override def computeStats(): Statistics = {
-    val e = new java.lang.Exception()
-    e.printStackTrace()
-    Statistics(sizeInBytes = 0)
+  //   val e = new java.lang.Exception()
+  //   e.printStackTrace()
+  //   Statistics(sizeInBytes = 0)
+    GpuSizeInBytesOnlyStatsPlanVisitor.visit(this)
   }
 
   /**
