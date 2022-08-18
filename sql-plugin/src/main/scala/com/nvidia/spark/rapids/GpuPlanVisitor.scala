@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids
 
+import org.apache.spark.sql.catalyst.expressions.AttributeMap
 import org.apache.spark.sql.catalyst.plans.{LeftAnti, LeftSemi}
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.logical.statsEstimation.EstimationUtils
@@ -27,6 +28,8 @@ trait GpuPlanVisitor[T] {
     case p: GpuHashJoin => visitJoin(p)
     case p: GpuExpandExec => visitExpand(p)
     case p: GpuHashAggregateExec => visitAggregate(p)
+    case p: GpuGlobalLimitExec => visitGlobalLimit(p)
+    case p: GpuLocalLimitExec => visitLocalLimit(p)
     case p: UnaryExecNode => visitUnaryNode(p)
     case p: GpuExec => default(p)
   }
@@ -40,6 +43,10 @@ trait GpuPlanVisitor[T] {
   def visitJoin(p: GpuHashJoin): T
 
   def visitExpand(p: GpuExpandExec): T
+
+  def visitGlobalLimit(p: GpuGlobalLimitExec): T
+
+  def visitLocalLimit(p: GpuLocalLimitExec): T
 }
 
 object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
@@ -91,5 +98,31 @@ object GpuSizeInBytesOnlyStatsPlanVisitor extends GpuPlanVisitor[Statistics] {
   override def visitExpand(p: GpuExpandExec): Statistics = {
     val sizeInBytes = visitUnaryNode(p).sizeInBytes * p.projections.length
     Statistics(sizeInBytes = sizeInBytes)
+  }
+
+  override def visitGlobalLimit(p: GpuGlobalLimitExec): Statistics = {
+    val limit = p.limit
+    val childStats = p.child.stats
+    val rowCount: BigInt = childStats.rowCount.map(_.min(limit)).getOrElse(limit)
+    // Don't propagate column stats, because we don't know the distribution after limit
+    Statistics(
+      sizeInBytes = EstimationUtils.getOutputSize(p.output, rowCount, childStats.attributeStats),
+      rowCount = Some(rowCount))
+  }
+
+  override def visitLocalLimit(p: GpuLocalLimitExec): Statistics = {
+    val limit = p.limit
+    val childStats = p.child.stats
+    if (limit == 0) {
+      // sizeInBytes can't be zero, or sizeInBytes of BinaryNode will also be zero
+      // (product of children).
+      Statistics(sizeInBytes = 1, rowCount = Some(0))
+    } else {
+      // The output row count of LocalLimit should be the sum of row counts from each partition.
+      // However, since the number of partitions is not available here, we just use statistics of
+      // the child. Because the distribution after a limit operation is unknown, we do not propagate
+      // the column stats.
+      childStats.copy(attributeStats = AttributeMap(Nil))
+    }
   }
 }
