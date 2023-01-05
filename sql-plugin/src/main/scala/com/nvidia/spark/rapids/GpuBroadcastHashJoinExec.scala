@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.{NvtxColor, NvtxRange}
-import com.nvidia.spark.rapids.shims.ShimBinaryExecNode
+import com.nvidia.spark.rapids.shims.{ShimBinaryExecNode, ShuffleOriginUtil}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
@@ -27,10 +27,10 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.{FullOuter, JoinType}
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, Distribution, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
+import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, HashedRelationBroadcastMode}
-import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExec, GpuBroadcastHelper, GpuHashJoin, JoinTypeChecks}
+import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExec, GpuBroadcastHelper, GpuHashJoin, GpuShuffleExchangeExecBase, JoinTypeChecks}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -140,6 +140,12 @@ case class GpuBroadcastHashJoinExec(
     case (_, _) => Seq(null, null)
   }
 
+  def hasBroadcastExchange: Boolean = buildPlan match {
+    case reused: ReusedExchangeExec => reused.child.isInstanceOf[GpuBroadcastExchangeExec]
+    case _: BroadcastQueryStageExec | _: GpuBroadcastExchangeExec => true
+    case _ => false
+  }
+
   def broadcastExchange: GpuBroadcastExchangeExec = buildPlan match {
     case bqse: BroadcastQueryStageExec if bqse.plan.isInstanceOf[GpuBroadcastExchangeExec] =>
       bqse.plan.asInstanceOf[GpuBroadcastExchangeExec]
@@ -147,6 +153,13 @@ case class GpuBroadcastHashJoinExec(
       bqse.plan.asInstanceOf[ReusedExchangeExec].child.asInstanceOf[GpuBroadcastExchangeExec]
     case gpu: GpuBroadcastExchangeExec => gpu
     case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuBroadcastExchangeExec]
+  }
+
+  def columnarExchange: GpuShuffleExchangeExecBase = buildPlan match {
+    case sqse: ShuffleQueryStageExec if sqse.plan.isInstanceOf[GpuShuffleExchangeExecBase] =>
+      sqse.plan.asInstanceOf[GpuShuffleExchangeExecBase]
+    case gpu: GpuShuffleExchangeExecBase => gpu
+    case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuShuffleExchangeExecBase]
   }
 
   override def doExecute(): RDD[InternalRow] =
@@ -187,6 +200,20 @@ case class GpuBroadcastHashJoinExec(
       val buildBatch =
         GpuBroadcastHelper.getBroadcastBatch(broadcastRelation, buildSchema)
       (buildBatch, bufferedStreamIter)
+    }
+  }
+
+  private def broadcastRelation: Broadcast[Any] = {
+    if (hasBroadcastExchange) {
+      broadcastExchange.executeColumnarBroadcast[Any]()
+    } else {
+      val exchange = columnarExchange
+      if (!ShuffleOriginUtil.isSupportedInBroadcast) {
+        throw new IllegalStateException(
+            "Can only use a GpuShuffleExchangeExec here if this is an executor broadcast")
+      }
+
+      // Need to build a broadcastRelation out of the output of the shuffle
     }
   }
 
