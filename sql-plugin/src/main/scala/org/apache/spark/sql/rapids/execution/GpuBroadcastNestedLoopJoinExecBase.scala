@@ -23,6 +23,7 @@ import com.nvidia.spark.rapids.shims.{GpuBroadcastJoinMeta, ShimBinaryExecNode}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
@@ -39,7 +40,9 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-    extends GpuBroadcastJoinMeta[BroadcastNestedLoopJoinExec](join, conf, parent, rule) {
+    extends GpuBroadcastJoinMeta[BroadcastNestedLoopJoinExec](join, conf, parent, rule) with Logging {
+
+  import RapidsMeta.gpuSupportedTag
 
   val conditionMeta: Option[BaseExprMeta[_]] =
     join.condition.map(GpuOverrides.wrapExpr(_, conf, Some(this)))
@@ -77,10 +80,13 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
       willNotWorkOnGpu("the broadcast for this join must be on the GPU too")
     }
 
+    logWarning(s"gpuSupportedTag (before): ${buildSide.wrapped.getTagValue(gpuSupportedTag)}")
+    logWarning(s"build side: ${buildSide.wrapped.canonicalized}")
     if (!canThisBeReplaced) {
       buildSide.willNotWorkOnGpu(
         "the BroadcastNestedLoopJoin this feeds is not on the GPU")
     }
+    logWarning(s"gpuSupportedTag (after): ${buildSide.wrapped.getTagValue(gpuSupportedTag)}")
   }
 }
 

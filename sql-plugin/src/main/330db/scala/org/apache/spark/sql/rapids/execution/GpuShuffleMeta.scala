@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids.{DataFromReplacementRule, GpuExec, RapidsConf, RapidsMeta}
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.sql.catalyst.plans.physical.SinglePartition
 import org.apache.spark.sql.execution.exchange.{EXECUTOR_BROADCAST, ShuffleExchangeExec}
@@ -29,9 +30,13 @@ class GpuShuffleMeta(
     conf: RapidsConf,
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-  extends GpuShuffleMetaBase(shuffle, conf, parent, rule) {
+  extends GpuShuffleMetaBase(shuffle, conf, parent, rule) with Logging {
+
+  import RapidsMeta.gpuSupportedTag
 
   override def tagPlanForGpu(): Unit = {
+    logWarning(s"gpuSupportedTag (before): ${wrapped.getTagValue(gpuSupportedTag)}")
+    logWarning(s"wrapped: ${shuffle.canonicalized}")
     super.tagPlanForGpu()
 
     shuffle.shuffleOrigin match {
@@ -59,6 +64,8 @@ class GpuShuffleMeta(
 
       case _ =>
     }
+    logWarning(s"gpuSupportedTag (after): ${wrapped.getTagValue(gpuSupportedTag)}")
+    logWarning(s"wrapped: ${shuffle.canonicalized}")
   }
 
   override def convertToGpu(): GpuExec =
