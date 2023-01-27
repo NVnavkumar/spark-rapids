@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.GpuExpressionsUtils.columnarEvalToColumn
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.{ShimBinaryExpression, ShimExpression, ShimTernaryExpression, ShimUnaryExpression}
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
@@ -272,7 +273,7 @@ trait GpuBinaryExpression extends ShimBinaryExpression with GpuExpression {
 
 trait GpuBinaryOperator extends BinaryOperator with GpuBinaryExpression
 
-trait CudfBinaryExpression extends GpuBinaryExpression {
+trait CudfBinaryExpression extends GpuBinaryExpression with Logging {
   def binaryOp: BinaryOp
   def outputTypeOverride: DType = null
   def castOutputAtEnd: Boolean = false
@@ -281,6 +282,8 @@ trait CudfBinaryExpression extends GpuBinaryExpression {
   def outputType(l: BinaryOperable, r: BinaryOperable): DType = {
     val over = outputTypeOverride
     if (over == null) {
+      logWarning(s"binaryOp: $binaryOp, l = $l, r = $r")
+      logWarning(s"l type = ${l.getType()}, r type = ${r.getType()}")
       BinaryOperable.implicitConversion(binaryOp, l, r)
     } else {
       over
