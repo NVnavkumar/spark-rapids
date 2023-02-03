@@ -21,7 +21,7 @@ from marks import ignore_order, allow_non_gpu
 from spark_session import is_before_spark_320, with_cpu_session, is_before_spark_312, is_databricks_runtime, is_databricks113_or_later
 
 
-def create_dim_table(table_name, table_format, length=500):
+def create_dim_table(table_name, table_format, length=500, string_keys=False):
     def fn(spark):
         df = gen_df(spark, [
             ('key', IntegerGen(nullable=False, min_val=0, max_val=9, special_cases=[])),
@@ -31,6 +31,14 @@ def create_dim_table(table_name, table_format, length=500):
             ('filter', RepeatSeqGen(
                 IntegerGen(min_val=0, max_val=length, special_cases=[]), length=length // 20))
         ], length)
+        if string_keys:
+            df = df.selectExpr(
+                'cast(key as string) as key',
+                'cast(skey as string) as skey',
+                'cast(ex_key as string) as ex_key',
+                'value',
+                'filter'
+            )
         df.cache()
         df.write.format(table_format) \
             .mode("overwrite") \
@@ -40,7 +48,7 @@ def create_dim_table(table_name, table_format, length=500):
     return with_cpu_session(fn)
 
 
-def create_fact_table(table_name, table_format, length=2000):
+def create_fact_table(table_name, table_format, length=2000, string_keys=False):
     def fn(spark):
         df = gen_df(spark, [
             ('key', IntegerGen(nullable=False, min_val=0, max_val=9, special_cases=[])),
@@ -48,6 +56,13 @@ def create_fact_table(table_name, table_format, length=2000):
             # ex_key is not a partition column
             ('ex_key', IntegerGen(nullable=False, min_val=0, max_val=3, special_cases=[])),
             ('value', int_gen)], length)
+        if string_keys:
+            df = df.selectExpr(
+                'cast(key as string) as key',
+                'cast(skey as string) as skey',
+                'cast(ex_key as string) as ex_key',
+                'value'
+            )
         df.write.format(table_format) \
             .mode("overwrite") \
             .partitionBy('key', 'skey') \
@@ -92,6 +107,14 @@ _statements = [
     ON f.keys = d.keys
     WHERE d.filter = {2}
     GROUP BY f.key
+    ''',
+    '''
+    SELECT fact.key, fact.skey, sum(fact.value)
+    FROM {0} fact
+    JOIN {1} dim
+    ON fact.key = dim.key AND fact.skey = dim.skey
+    WHERE dim.filter = {2}
+    GROUP BY fact.key, fact.skey
     ''',
     '''
     SELECT fact.key, fact.skey, fact.ex_key, sum(fact.value)
@@ -178,7 +201,36 @@ def test_dpp_reuse_broadcast_exchange(spark_tmp_table_factory, store_format, s_i
         lambda spark: spark.sql(statement),
         # The existence of GpuSubqueryBroadcastExec indicates the reuse works on the GPU
         exist_classes,
-        conf=dict(_exchange_reuse_conf + [('spark.sql.adaptive.enabled', aqe_enabled)]))
+        conf=dict(_exchange_reuse_conf + [('spark.sql.adaptive.enabled', aqe_enabled),
+        ('spark.rapids.sql.debug.logTransformations', 'true')]))
+
+# When BroadcastExchangeExec is available on filtering side, and it can be reused:
+# DynamicPruningExpression(InSubqueryExec(value, GpuSubqueryBroadcastExec)))
+@ignore_order
+@pytest.mark.parametrize('store_format', ['parquet', 'orc'], ids=idfn)
+@pytest.mark.parametrize('s_index', list(range(len(_statements))), ids=idfn)
+@pytest.mark.parametrize('aqe_enabled', [
+    'false',
+    pytest.param('true', marks=pytest.mark.skipif(is_before_spark_320() and not is_databricks_runtime(),
+                                                  reason='Only in Spark 3.2.0+ AQE and DPP can be both enabled'))
+], ids=idfn)
+def test_dpp_reuse_broadcast_exchange_string_keys(spark_tmp_table_factory, store_format, s_index, aqe_enabled):
+    fact_table, dim_table = spark_tmp_table_factory.get(), spark_tmp_table_factory.get()
+    create_fact_table(fact_table, store_format, length=10000, string_keys=True)
+    filter_val = create_dim_table(dim_table, store_format, length=2000, string_keys=True)
+    statement = _statements[s_index].format(fact_table, dim_table, filter_val)
+    if is_databricks113_or_later() and aqe_enabled == 'true':
+        # SubqueryBroadcastExec is unoptimized in Databricks 11.3 with EXECUTOR_BROADCAST
+        # See https://github.com/NVIDIA/spark-rapids/issues/7425
+        exist_classes='DynamicPruningExpression,SubqueryBroadcastExec,ReusedExchangeExec'
+    else:
+        exist_classes='DynamicPruningExpression,GpuSubqueryBroadcastExec,ReusedExchangeExec'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(statement),
+        # The existence of GpuSubqueryBroadcastExec indicates the reuse works on the GPU
+        exist_classes,
+        conf=dict(_exchange_reuse_conf + [('spark.sql.adaptive.enabled', aqe_enabled),
+        ('spark.rapids.sql.debug.logTransformations', 'true')]))
 
 
 # The SubqueryBroadcast can work on GPU even if the scan who holds it fallbacks into CPU.
@@ -255,8 +307,8 @@ def test_dpp_via_aggregate_subquery(spark_tmp_table_factory, store_format, s_ind
 ], ids=idfn)
 def test_dpp_skip(spark_tmp_table_factory, store_format, s_index, aqe_enabled):
     fact_table, dim_table = spark_tmp_table_factory.get(), spark_tmp_table_factory.get()
-    create_fact_table(fact_table, store_format)
-    filter_val = create_dim_table(dim_table, store_format)
+    create_fact_table(fact_table, store_format, string_keys=True)
+    filter_val = create_dim_table(dim_table, store_format, string_keys=True)
     statement = _statements[s_index].format(fact_table, dim_table, filter_val)
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.sql(statement),
