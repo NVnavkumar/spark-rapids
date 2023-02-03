@@ -109,17 +109,17 @@ _statements = [
     GROUP BY f.key
     ''',
     '''
-    SELECT fact.key, fact.skey, sum(fact.value)
-    FROM {0} fact
-    JOIN {1} dim
-    ON fact.key = dim.key AND fact.skey = dim.skey
-    WHERE dim.filter = {2}
-    GROUP BY fact.key, fact.skey
-    ''',
-    '''
     SELECT fact.key, fact.skey, fact.ex_key, sum(fact.value)
     FROM {0} fact
     JOIN {1} dim
+    ON fact.key = dim.key AND fact.skey = dim.skey AND fact.ex_key = dim.ex_key
+    WHERE dim.filter = {2}
+    GROUP BY fact.key, fact.skey, fact.ex_key
+    ''',
+    '''
+    SELECT fact.key, fact.skey, fact.ex_key, sum(fact.value)
+    FROM {1} dim
+    JOIN {0} fact
     ON fact.key = dim.key AND fact.skey = dim.skey AND fact.ex_key = dim.ex_key
     WHERE dim.filter = {2}
     GROUP BY fact.key, fact.skey, fact.ex_key
