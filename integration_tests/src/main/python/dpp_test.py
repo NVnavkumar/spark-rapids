@@ -198,6 +198,29 @@ def test_dpp_reuse_broadcast_exchange_cpu_scan(spark_tmp_table_factory):
             ('spark.rapids.sql.format.parquet.read.enabled', 'false')]))
 
 
+@ignore_order
+@pytest.mark.allow_non_gpu("SubqueryBroadcastExec")
+@pytest.mark.parametrize('aqe_enabled', [
+    'false',
+    pytest.param('true', marks=pytest.mark.skipif(is_before_spark_320() and not is_databricks_runtime(),
+                                                  reason='Only in Spark 3.2.0+ AQE and DPP can be both enabled'))
+], ids=idfn)
+def test_dpp_reuse_broadcast_exchange_subquery_fallback(spark_tmp_table_factory, aqe_enabled):
+    fact_table, dim_table = spark_tmp_table_factory.get(), spark_tmp_table_factory.get()
+    create_fact_table(fact_table, 'parquet', length=10000)
+    filter_val = create_dim_table(dim_table, 'parquet', length=2000)
+    statement = _statements[0].format(fact_table, dim_table, filter_val)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(statement),
+        # check for explicit CPU SubqueryBroadcastExec
+        exist_classes='SubqueryBroadcastExec,ReusedExchangeExec',
+        conf=dict(_exchange_reuse_conf + [
+            ('spark.sql.adaptive.enabled', aqe_enabled),
+            ('spark.rapids.sql.debug.logTransformations', 'true'),
+            ('spark.rapids.sql.exec.SubqueryBroadcastExec', 'false')]))
+
+
+
 # When BroadcastExchange is not available and non-broadcast DPPs are forbidden, Spark will bypass it:
 # DynamicPruningExpression(Literal.TrueLiteral)
 @ignore_order
