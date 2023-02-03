@@ -18,13 +18,16 @@ package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids._
 
-import org.apache.spark.sql.catalyst.expressions.DynamicPruningExpression
+import org.apache.spark.sql.catalyst.expressions.{DynamicPruningExpression, Expression}
+import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, InMemoryFileIndex}
 import org.apache.spark.sql.execution.datasources.json.JsonFileFormat
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.joins.HashedRelationBroadcastMode
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
-import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExec, GpuSubqueryBroadcastExec}
+import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExec, GpuBroadcastToRowExec, GpuSubqueryBroadcastExec}
 
 class FileSourceScanExecMeta(plan: FileSourceScanExec,
     conf: RapidsConf,
@@ -69,6 +72,22 @@ class FileSourceScanExecMeta(plan: FileSourceScanExec,
           case _: ReusedExchangeExec =>
             converted.asInstanceOf[BaseSubqueryExec]
         }
+        case c: SubqueryBroadcastExec =>
+          converted.transformUp {
+            case e: BroadcastQueryStageExec => e.plan match {
+              case ReusedExchangeExec(output, b: GpuBroadcastExchangeExec) => 
+                // we can't directly re-use a GPU broadcast exchange to feed a CPU broadcast
+                // join but Spark will sometimes try and do this
+                val keys = output.map { a => a.asInstanceOf[Expression] }
+                val (index, keyExprs) = b.mode match {
+                  case HashedRelationBroadcastMode(keys, _) => (None, Some(keys))
+                  case IdentityBroadcastMode => (Some(0), None)
+                  case m => throw new UnsupportedOperationException(s"Unknown broadcast mode $m")
+                }
+                GpuBroadcastToRowExec(keys, b.mode, e)(index, keyExprs)
+              case _ => e
+            }
+          }.asInstanceOf[BaseSubqueryExec]
         case _ =>
           converted.asInstanceOf[BaseSubqueryExec]
       }
