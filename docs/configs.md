@@ -10,7 +10,7 @@ The following is the list of options that `rapids-plugin-4-spark` supports.
 On startup use: `--conf [conf key]=[conf value]`. For example:
 
 ```
-${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-23.02.0-SNAPSHOT-cuda11.jar \
+${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-23.04.0-SNAPSHOT-cuda11.jar \
 --conf spark.plugins=com.nvidia.spark.SQLPlugin \
 --conf spark.rapids.sql.concurrentGpuTasks=2
 ```
@@ -103,6 +103,7 @@ Name | Description | Default Value | Applicable at
 <a name="sql.format.hive.text.read.double.enabled"></a>spark.rapids.sql.format.hive.text.read.double.enabled|Hive text file reading is not 100% compatible when reading doubles.|true|Runtime
 <a name="sql.format.hive.text.read.enabled"></a>spark.rapids.sql.format.hive.text.read.enabled|When set to false disables Hive text table read acceleration|true|Runtime
 <a name="sql.format.hive.text.read.float.enabled"></a>spark.rapids.sql.format.hive.text.read.float.enabled|Hive text file reading is not 100% compatible when reading floats.|true|Runtime
+<a name="sql.format.hive.text.write.enabled"></a>spark.rapids.sql.format.hive.text.write.enabled|When set to false disables Hive text table write acceleration|false|Runtime
 <a name="sql.format.iceberg.enabled"></a>spark.rapids.sql.format.iceberg.enabled|When set to false disables all Iceberg acceleration|true|Runtime
 <a name="sql.format.iceberg.read.enabled"></a>spark.rapids.sql.format.iceberg.read.enabled|When set to false disables Iceberg input acceleration|true|Runtime
 <a name="sql.format.json.enabled"></a>spark.rapids.sql.format.json.enabled|When set to true enables all json input and output acceleration. (only input is currently supported anyways)|false|Runtime
