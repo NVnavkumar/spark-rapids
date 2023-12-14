@@ -182,7 +182,7 @@ ci_scala213() {
     ln -sf ../jenkins jenkins
 
     # Download a Scala 2.13 version of Spark
-    prepare_spark 3.3.0 2.13
+    prepare_spark 3.3.3 2.13
 
     # build Scala 2.13 versions
     for version in "${SPARK_SHIM_VERSIONS_PREMERGE_SCALA213[@]}"
@@ -196,7 +196,7 @@ ci_scala213() {
             -DwildcardSuites=org.apache.spark.sql.rapids.filecache.FileCacheIntegrationSuite
     done
 
-    $MVN_CMD -U -B $MVN_URM_MIRROR clean package $MVN_BUILD_ARGS -DskipTests=true
+    $MVN_CMD -U -B $MVN_URM_MIRROR clean package $MVN_BUILD_ARGS -Dbuildver=333 -DskipTests=true
     cd .. # Run integration tests in the project root dir to leverage test cases and resource files
     export TEST_TAGS="not premerge_ci_1"
     export TEST_TYPE="pre-commit"
