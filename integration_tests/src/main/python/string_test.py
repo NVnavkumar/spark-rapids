@@ -669,7 +669,7 @@ def test_ascii():
     gen = mk_str_gen('.{0,5}')
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, gen).select(f.ascii(f.col('a'))),
-            conf={'spark.rapids.sql.expression.Ascii': True})
+            conf={'spark.rapids.sql.expression.Ascii': "true"})
 
 @incompat
 def test_initcap():
